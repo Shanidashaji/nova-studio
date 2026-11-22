@@ -103,9 +103,14 @@ async function setup(page: Page, config: FakeConfig, storage: Record<string, str
         if (fake.devices.length === 0)
           throw new DOMException('Requested device not found', 'NotFoundError');
         if (fake.permissionAfterGum) fake.permission = fake.permissionAfterGum;
-        // A real, silent audio track.
+        // A real, silent audio track, labelled as Chrome labels the track of the default input
+        // ("Default - <device>"). Without this the track reports the Web Audio node's own name
+        // ("MediaStreamAudioDestinationNode"), which no real microphone ever does.
         const ctx = new AudioContext();
-        return ctx.createMediaStreamDestination().stream;
+        const stream = ctx.createMediaStreamDestination().stream;
+        for (const track of stream.getAudioTracks())
+          Object.defineProperty(track, 'label', { value: `Default - ${fake.devices[0]}` });
+        return stream;
       };
 
       // ── Speech recognition ──
@@ -271,8 +276,14 @@ test.describe('NOVA voice', () => {
     );
     await micButton(page).click();
     const panel = nova(page);
-    await expect(panel.getByText('Which projects are delayed?').first()).toBeVisible();
+    // The sentence is also one of the panel's starter suggestions (buttons), so finding its text
+    // anywhere in the panel proves nothing and used to pass before the retry had run. Look for
+    // the conversation entry instead: its "spoken" tag exists only on a message that arrived
+    // through voice input, which here can only come from the second recognition session.
+    const message = panel.getByRole('listitem').filter({ hasText: 'Which projects are delayed?' });
+    await expect(message.first()).toContainText('spoken');
     await expect(page.getByText(/No microphone was found/)).toHaveCount(0);
+    await expect(page.locator('[data-voice-problem]')).toHaveCount(0);
     expect((await read(page)).starts).toBe(2);
   });
 

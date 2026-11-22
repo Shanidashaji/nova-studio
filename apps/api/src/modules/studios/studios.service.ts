@@ -1,5 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma } from '@nova/db';
+import {
+  StudioLocation,
+  type PopulateOptions,
+  type Project,
+  type Shoot,
+  type Studio,
+  type StudioBooking,
+  type User,
+} from '@nova/db';
 import type {
   CreateStudioBooking,
   RangeQuery,
@@ -9,8 +17,7 @@ import type {
   UpdateStudioBooking,
 } from '@nova/shared';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import type { Db } from '../../database/prisma.service';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { iso } from '../projects/project.mapper';
 
@@ -18,27 +25,35 @@ const DAY = 86_400_000;
 /** Bookable hours per day used for utilisation (08:00–22:00). */
 const OPEN_HOURS = 14;
 
-const bookingInclude = {
-  studio: { select: { id: true, name: true } },
-  project: { select: { id: true, code: true, title: true } },
-  shoot: { select: { id: true, title: true } },
-  bookedBy: { select: { id: true, name: true } },
-} satisfies Prisma.StudioBookingInclude;
+const bookingPopulate: PopulateOptions[] = [
+  { path: 'studio', select: { name: 1 } },
+  { path: 'project', select: { code: 1, title: 1 } },
+  { path: 'shoot', select: { title: 1 } },
+  { path: 'bookedBy', select: { name: 1 } },
+];
 
-const toBooking = (
-  b: Prisma.StudioBookingGetPayload<{ include: typeof bookingInclude }>,
-): StudioBookingView => ({
+type BookingRow = StudioBooking & {
+  studio: Pick<Studio, '_id' | 'id' | 'name'>;
+  project: Pick<Project, '_id' | 'id' | 'code' | 'title'> | null;
+  shoot: Pick<Shoot, '_id' | 'id' | 'title'> | null;
+  bookedBy: Pick<User, '_id' | 'id' | 'name'> | null;
+};
+
+const toBooking = (b: BookingRow): StudioBookingView => ({
   id: b.id,
-  studio: b.studio,
+  studio: { id: b.studio.id, name: b.studio.name },
   title: b.title,
   status: b.status,
   startsAt: iso(b.startsAt),
   endsAt: iso(b.endsAt),
   notes: b.notes,
-  project: b.project,
-  shoot: b.shoot,
-  bookedBy: b.bookedBy,
+  project: b.project ? { id: b.project.id, code: b.project.code, title: b.project.title } : null,
+  shoot: b.shoot ? { id: b.shoot.id, title: b.shoot.title } : null,
+  bookedBy: b.bookedBy ? { id: b.bookedBy.id, name: b.bookedBy.name } : null,
 });
+
+/** Studio locations in their declared order (the former Postgres enum sort order). */
+const LOCATION_ORDER: readonly string[] = Object.values(StudioLocation);
 
 const fmt = (d: Date) =>
   d.toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -47,7 +62,7 @@ const fmt = (d: Date) =>
 @Injectable()
 export class StudiosService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
@@ -59,16 +74,20 @@ export class StudiosService {
     weekStart.setHours(0, 0, 0, 0);
     weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
     const weekEnd = new Date(weekStart.getTime() + 7 * DAY);
-    const studios = await this.prisma.db.studio.findMany({
-      include: {
-        bookings: {
-          where: { endsAt: { gt: from }, startsAt: { lt: to } },
-          include: bookingInclude,
-          orderBy: { startsAt: 'asc' },
-        },
-      },
-      orderBy: [{ location: 'asc' }, { name: 'asc' }],
-    });
+    const studios = await this.database.models.Studio.find()
+      .populate({
+        path: 'bookings',
+        match: { endsAt: { $gt: from }, startsAt: { $lt: to } },
+        options: { sort: { startsAt: 1 } },
+        populate: bookingPopulate,
+      })
+      .lean<(Studio & { bookings: BookingRow[] })[]>();
+    // Location in declared enum order, then name (as Postgres ordered them).
+    studios.sort(
+      (a, b) =>
+        LOCATION_ORDER.indexOf(a.location) - LOCATION_ORDER.indexOf(b.location) ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    );
     return studios.map((s) => {
       const booked = s.bookings
         .filter((b) => b.status !== 'CANCELLED')
@@ -92,23 +111,24 @@ export class StudiosService {
     });
   }
 
-  /** Serialises bookings per studio and rejects any overlap with an active booking. */
+  /**
+   * Serialises bookings per studio and rejects any overlap with an active booking. Must be the
+   * first statement of the transaction: locking the studio makes concurrent bookings of it
+   * conflict, so MongoDB retries the later one, which then sees the earlier booking.
+   */
   private async assertFree(
-    tx: Db,
     studioId: string,
     range: { startsAt: Date; endsAt: Date },
     exceptId?: string,
   ) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`nova-studio-${studioId}`}))`;
-    const clash = await tx.studioBooking.findFirst({
-      where: {
-        studioId,
-        status: { not: 'CANCELLED' },
-        startsAt: { lt: range.endsAt },
-        endsAt: { gt: range.startsAt },
-        ...(exceptId ? { id: { not: exceptId } } : {}),
-      },
-    });
+    await this.database.lock('Studio', studioId);
+    const clash = await this.database.models.StudioBooking.findOne({
+      studioId,
+      status: { $ne: 'CANCELLED' },
+      startsAt: { $lt: range.endsAt },
+      endsAt: { $gt: range.startsAt },
+      ...(exceptId ? { _id: { $ne: exceptId } } : {}),
+    }).lean<StudioBooking>();
     if (clash) {
       throw conflict(
         'STUDIO_CONFLICT',
@@ -119,38 +139,37 @@ export class StudiosService {
   }
 
   async book(input: CreateStudioBooking, user: SessionUser): Promise<StudioBookingView> {
-    const studio = await this.prisma.db.studio.findUnique({ where: { id: input.studioId } });
+    const { Studio, Shoot, Project, StudioBooking } = this.database.models;
+    const studio = await Studio.findById(input.studioId).lean<Studio>();
     if (!studio?.isActive) throw unprocessable('INVALID_STUDIO', 'Choose an active studio.');
     if (input.shootId) {
-      const shoot = await this.prisma.db.shoot.findUnique({ where: { id: input.shootId } });
+      const shoot = await Shoot.findById(input.shootId).lean<Shoot>();
       if (!shoot) throw unprocessable('INVALID_SHOOT', 'Choose an existing shoot.');
       if (input.projectId && input.projectId !== shoot.projectId) {
         throw unprocessable('SHOOT_PROJECT_MISMATCH', 'That shoot belongs to a different project.');
       }
       input.projectId ??= shoot.projectId;
     }
-    if (
-      input.projectId &&
-      !(await this.prisma.db.project.findUnique({ where: { id: input.projectId } }))
-    ) {
+    if (input.projectId && !(await Project.exists({ _id: input.projectId }))) {
       throw unprocessable('INVALID_PROJECT', 'Choose an existing project.');
     }
-    const booking = await this.activity.transaction(async (tx, log) => {
-      await this.assertFree(tx, studio.id, input);
-      const b = await tx.studioBooking.create({
-        data: {
-          studioId: studio.id,
-          title: input.title,
-          projectId: input.projectId ?? null,
-          shootId: input.shootId ?? null,
-          startsAt: input.startsAt,
-          endsAt: input.endsAt,
-          status: input.status,
-          notes: input.notes,
-          bookedById: user.id,
-        },
-        include: bookingInclude,
+    const booking = await this.activity.transaction(async (log) => {
+      await this.assertFree(studio.id, input);
+      const created = await StudioBooking.create({
+        studioId: studio.id,
+        title: input.title,
+        projectId: input.projectId ?? null,
+        shootId: input.shootId ?? null,
+        startsAt: input.startsAt,
+        endsAt: input.endsAt,
+        status: input.status,
+        notes: input.notes,
+        bookedById: user.id,
       });
+      const b = await StudioBooking.findById(created._id)
+        .populate(bookingPopulate)
+        .lean<BookingRow>();
+      if (!b) throw notFound('Studio booking');
       await log({
         actorId: user.id,
         action: 'studio.booked',
@@ -169,24 +188,26 @@ export class StudiosService {
     input: UpdateStudioBooking,
     user: SessionUser,
   ): Promise<StudioBookingView> {
-    const b = await this.prisma.db.studioBooking.findUnique({
-      where: { id },
-      include: { studio: true },
-    });
+    const { StudioBooking } = this.database.models;
+    const b = await StudioBooking.findById(id)
+      .populate('studio')
+      .lean<StudioBooking & { studio: Studio }>();
     if (!b) throw notFound('Studio booking');
     if (b.status === 'CANCELLED') throw conflict('BOOKING_CANCELLED', 'This booking is cancelled.');
     const startsAt = input.startsAt ?? b.startsAt;
     const endsAt = input.endsAt ?? b.endsAt;
     if (endsAt <= startsAt)
       throw unprocessable('INVALID_RANGE', 'The booking must end after it starts.');
-    const updated = await this.activity.transaction(async (tx, log) => {
-      if (input.status !== 'CANCELLED')
-        await this.assertFree(tx, b.studioId, { startsAt, endsAt }, id);
-      const next = await tx.studioBooking.update({
-        where: { id },
-        data: { status: input.status, startsAt, endsAt, notes: input.notes },
-        include: bookingInclude,
-      });
+    const updated = await this.activity.transaction(async (log) => {
+      if (input.status !== 'CANCELLED') await this.assertFree(b.studioId, { startsAt, endsAt }, id);
+      const next = await StudioBooking.findByIdAndUpdate(
+        id,
+        { $set: { status: input.status, startsAt, endsAt, notes: input.notes } },
+        { new: true },
+      )
+        .populate(bookingPopulate)
+        .lean<BookingRow>();
+      if (!next) throw notFound('Studio booking');
       await log({
         actorId: user.id,
         action: input.status === 'CANCELLED' ? 'studio.cancelled' : 'studio.updated',

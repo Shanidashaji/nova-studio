@@ -15,7 +15,7 @@ import { Input, Select } from '@/components/ui/field';
 import { AvatarStack, Meter, Segmented } from '@/components/ui/misc';
 import { PanelState } from '@/components/ui/panel';
 import { useFocusFilter } from '@/features/shell/use-focus';
-import { useCan } from '@/features/shell/user-context';
+import { useCan, useCanSeeProjectMoney } from '@/features/shell/user-context';
 import { date, money, relativeDay } from '@/lib/format';
 import { useProjects } from '@/lib/queries';
 import { healthTone } from '@/lib/status';
@@ -34,6 +34,7 @@ export function ProductionsLens() {
   const [sort, setSort] = useState<ProjectListQuery['sort']>('due');
   const [creating, setCreating] = useState(false);
   const canCreate = useCan('project:write');
+  const showMoney = useCanSeeProjectMoney();
 
   // One request per pause in typing, not one per keystroke.
   const [search, setSearch] = useState('');
@@ -94,7 +95,7 @@ export function ProductionsLens() {
           <option value="due">Sort: due date</option>
           <option value="health">Sort: health</option>
           <option value="progress">Sort: progress</option>
-          <option value="budget">Sort: budget</option>
+          {showMoney ? <option value="budget">Sort: budget</option> : null}
           <option value="title">Sort: title</option>
         </Select>
         <div className="ml-auto flex items-center gap-2">
@@ -259,7 +260,7 @@ function ProjectTable({ items }: { items: ProjectSummary[] }) {
               </td>
               <td className="px-3 py-2 font-mono text-xs text-text-2">{date(p.dueDate)}</td>
               <td className="px-3 py-2 font-mono text-xs text-text-2">
-                {money(p.spent)} / {money(p.budget)}
+                {p.budget === null ? '—' : `${money(p.spent)} / ${money(p.budget)}`}
               </td>
               <td className="px-3 py-2">
                 <AvatarStack names={p.team.map((m) => m.name)} size={20} />

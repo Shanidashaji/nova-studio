@@ -1,28 +1,15 @@
 /**
- * Private file storage for documents (ADR-0012). Files live outside the repository and the web
- * root, under random keys; nothing here is ever served statically.
+ * Private file storage for documents (ADR-0012), kept in MongoDB GridFS (bucket `documentFiles`).
+ * Files sit next to the records that reference them, so a serverless deployment (whose disk is
+ * temporary) needs no extra storage service. Keys are random; nothing here is served statically.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import type { Readable } from 'node:stream';
+import { GridFSBucket } from 'mongodb';
+import type { Database } from './database';
 
 const KEY = /^[a-f0-9]{32}$/;
-
-export function resolveStorageDir(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.NOVA_STORAGE_DIR) return path.resolve(env.NOVA_STORAGE_DIR);
-  const root =
-    process.platform === 'win32'
-      ? path.join(env.LOCALAPPDATA ?? os.homedir(), 'nova')
-      : path.join(os.homedir(), '.local', 'share', 'nova');
-  return path.join(root, env.NODE_ENV === 'test' ? 'storage-test' : 'storage');
-}
-
-/** Absolute path for a storage key. Throws for anything that is not a generated key. */
-export function storagePath(dir: string, key: string): string {
-  if (!KEY.test(key)) throw new Error('Invalid storage key.');
-  return path.join(dir, key.slice(0, 2), key);
-}
+const BUCKET = 'documentFiles';
 
 export interface StoredObject {
   storageKey: string;
@@ -30,13 +17,27 @@ export interface StoredObject {
   sizeBytes: number;
 }
 
+function bucket(db: Database): GridFSBucket {
+  return new GridFSBucket(db.connection.db!, { bucketName: BUCKET });
+}
+
+function assertKey(key: string): void {
+  if (!KEY.test(key)) throw new Error('Invalid storage key.');
+}
+
 /** Writes bytes under a new random key and returns the key and SHA-256 digest. */
-export async function putObject(dir: string, bytes: Buffer): Promise<StoredObject> {
+export async function putObject(
+  db: Database,
+  bytes: Buffer,
+  mimeType?: string,
+): Promise<StoredObject> {
   const storageKey = randomBytes(16).toString('hex');
-  const file = storagePath(dir, storageKey);
-  await fs.promises.mkdir(path.dirname(file), { recursive: true });
-  // `wx` refuses to overwrite: a key collision fails loudly instead of replacing a file.
-  await fs.promises.writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
+  await new Promise<void>((resolve, reject) => {
+    const upload = bucket(db).openUploadStream(storageKey, { metadata: { mimeType } });
+    upload.once('error', reject);
+    upload.once('finish', () => resolve());
+    upload.end(bytes);
+  });
   return {
     storageKey,
     sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -44,6 +45,19 @@ export async function putObject(dir: string, bytes: Buffer): Promise<StoredObjec
   };
 }
 
-export async function removeObject(dir: string, key: string): Promise<void> {
-  await fs.promises.rm(storagePath(dir, key), { force: true });
+/** Removes every stored copy under `key` (no error when it is already gone). */
+export async function removeObject(db: Database, key: string): Promise<void> {
+  assertKey(key);
+  const b = bucket(db);
+  const files = await b.find({ filename: key }, { projection: { _id: 1 } }).toArray();
+  for (const f of files) await b.delete(f._id);
+}
+
+/** Opens a stored file for reading, or returns null when no file has this key. */
+export async function openObject(db: Database, key: string): Promise<Readable | null> {
+  assertKey(key);
+  const b = bucket(db);
+  const file = await b.find({ filename: key }, { limit: 1 }).next();
+  if (!file) return null;
+  return b.openDownloadStream(file._id);
 }

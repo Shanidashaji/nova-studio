@@ -7,8 +7,9 @@ import type {
   SessionUser,
   UpdateLeadOwnership,
 } from '@nova/shared';
+import type { Client, ClientContact, Lead, User } from '@nova/db';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { ProjectsService } from '../projects/projects.service';
 
@@ -22,19 +23,19 @@ export class CrmService {
   private readonly converting = new Set<string>();
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
     private readonly projects: ProjectsService,
   ) {}
 
   async contacts(clientId: string): Promise<ContactView[]> {
-    if (!(await this.prisma.db.client.findUnique({ where: { id: clientId } }))) {
+    const { Client: Clients, ClientContact: Contacts } = this.database.models;
+    if (!(await Clients.exists({ _id: clientId }))) {
       throw notFound('Client');
     }
-    const rows = await this.prisma.db.clientContact.findMany({
-      where: { clientId },
-      orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }],
-    });
+    const rows = await Contacts.find({ clientId })
+      .sort({ isPrimary: -1, name: 1 })
+      .lean<ClientContact[]>();
     return rows.map((c) => ({
       id: c.id,
       name: c.name,
@@ -46,18 +47,26 @@ export class CrmService {
   }
 
   async addContact(clientId: string, input: CreateContact, user: SessionUser) {
-    const client = await this.prisma.db.client.findUnique({ where: { id: clientId } });
+    const { Client: Clients, ClientContact: Contacts } = this.database.models;
+    const client = await Clients.findById(clientId).lean<Client>();
     if (!client) throw notFound('Client');
-    await this.activity.transaction(async (tx, log) => {
+    await this.activity.transaction(async (log) => {
       if (input.isPrimary) {
-        await tx.clientContact.updateMany({ where: { clientId }, data: { isPrimary: false } });
+        await Contacts.updateMany({ clientId }, { $set: { isPrimary: false } });
         // Keep the client's headline contact in step with the primary contact.
-        await tx.client.update({
-          where: { id: clientId },
-          data: { contactName: input.name, contactEmail: input.email, contactPhone: input.phone },
-        });
+        const res = await Clients.updateOne(
+          { _id: clientId },
+          {
+            $set: {
+              contactName: input.name,
+              contactEmail: input.email,
+              contactPhone: input.phone,
+            },
+          },
+        );
+        if (res.matchedCount === 0) throw notFound('Client');
       }
-      const c = await tx.clientContact.create({ data: { ...input, clientId } });
+      const c = (await Contacts.create({ ...input, clientId })).toObject() as ClientContact;
       await log({
         actorId: user.id,
         action: 'client.contact_added',
@@ -70,35 +79,38 @@ export class CrmService {
   }
 
   async removeContact(clientId: string, contactId: string, user: SessionUser) {
-    const c = await this.prisma.db.clientContact.findFirst({
-      where: { id: contactId, clientId },
-      include: { client: true },
-    });
+    const { ClientContact: Contacts } = this.database.models;
+    const c = await Contacts.findOne({ _id: contactId, clientId })
+      .populate('client')
+      .lean<ClientContact & { client: Client | null }>();
     if (!c) throw notFound('Contact');
-    await this.activity.transaction(async (tx, log) => {
-      await tx.clientContact.delete({ where: { id: contactId } });
+    await this.activity.transaction(async (log) => {
+      const res = await Contacts.deleteOne({ _id: contactId });
+      if (res.deletedCount === 0) throw notFound('Contact');
       await log({
         actorId: user.id,
         action: 'client.contact_removed',
         entityType: 'client',
         entityId: clientId,
-        summary: `${user.name} removed contact ${c.name} from ${c.client.name}`,
+        summary: `${user.name} removed contact ${c.name} from ${c.client?.name ?? ''}`,
       });
     });
     return this.contacts(clientId);
   }
 
   async updateOwnership(leadId: string, input: UpdateLeadOwnership, user: SessionUser) {
-    const lead = await this.prisma.db.lead.findUnique({ where: { id: leadId } });
+    const { Lead: Leads, User: Users } = this.database.models;
+    const lead = await Leads.findById(leadId).lean<Lead>();
     if (!lead) throw notFound('Lead');
     let ownerName: string | null = null;
     if (input.ownerId) {
-      const owner = await this.prisma.db.user.findUnique({ where: { id: input.ownerId } });
+      const owner = await Users.findById(input.ownerId).lean<User>();
       if (!owner?.isActive) throw unprocessable('INVALID_OWNER', 'Choose an active user.');
       ownerName = owner.name;
     }
-    await this.activity.transaction(async (tx, log) => {
-      await tx.lead.update({ where: { id: leadId }, data: input });
+    await this.activity.transaction(async (log) => {
+      const res = await Leads.updateOne({ _id: leadId }, { $set: input });
+      if (res.matchedCount === 0) throw notFound('Lead');
       const parts = [
         input.ownerId !== undefined ? (ownerName ? `owner ${ownerName}` : 'unassigned') : null,
         input.nextFollowUpAt !== undefined
@@ -139,7 +151,8 @@ export class CrmService {
     input: ConvertLead,
     user: SessionUser,
   ): Promise<ProjectDetail> {
-    const lead = await this.prisma.db.lead.findUnique({ where: { id: leadId } });
+    const { Lead: Leads, Client: Clients } = this.database.models;
+    const lead = await Leads.findById(leadId).lean<Lead>();
     if (!lead) throw notFound('Lead');
     if (lead.convertedProjectId)
       throw conflict('LEAD_CONVERTED', 'This lead is already a project.');
@@ -151,14 +164,12 @@ export class CrmService {
     let clientId = lead.clientId;
     let createdClientId: string | null = null;
     if (!clientId) {
-      const client = await this.prisma.db.client.create({
-        data: {
-          name: lead.prospectName!,
-          industry: input.newClient!.industry,
-          city: input.newClient!.city,
-          contactEmail: input.newClient!.contactEmail,
-          status: 'ACTIVE',
-        },
+      const client = await Clients.create({
+        name: lead.prospectName!,
+        industry: input.newClient!.industry,
+        city: input.newClient!.city,
+        contactEmail: input.newClient!.contactEmail ?? null,
+        status: 'ACTIVE',
       });
       clientId = createdClientId = client.id;
     }
@@ -183,18 +194,25 @@ export class CrmService {
         user,
       );
     } catch (error) {
-      if (createdClientId) await this.prisma.db.client.delete({ where: { id: createdClientId } });
+      // Compensate: the brand-new client has nothing else pointing at it yet.
+      if (createdClientId) await Clients.deleteOne({ _id: createdClientId });
       throw error;
     }
 
-    await this.activity.transaction(async (tx, log) => {
+    const convertedClientId = clientId;
+    await this.activity.transaction(async (log) => {
       // Claim the lead only if nothing converted it meanwhile.
-      const { count } = await tx.lead.updateMany({
-        where: { id: leadId, convertedProjectId: null },
-        data: { stage: 'WON', clientId, convertedProjectId: project.id },
-      });
-      if (count === 0) throw conflict('LEAD_CONVERTED', 'This lead is already a project.');
-      await tx.client.update({ where: { id: clientId }, data: { status: 'ACTIVE' } });
+      const claim = await Leads.updateMany(
+        { _id: leadId, convertedProjectId: null },
+        { $set: { stage: 'WON', clientId: convertedClientId, convertedProjectId: project.id } },
+      );
+      if (claim.matchedCount === 0)
+        throw conflict('LEAD_CONVERTED', 'This lead is already a project.');
+      const res = await Clients.updateOne(
+        { _id: convertedClientId },
+        { $set: { status: 'ACTIVE' } },
+      );
+      if (res.matchedCount === 0) throw notFound('Client');
       await log({
         actorId: user.id,
         action: 'lead.converted',
@@ -204,6 +222,6 @@ export class CrmService {
         summary: `${user.name} converted lead “${lead.title}” into project ${project.code}${createdClientId ? ' and a new client' : ''}`,
       });
     });
-    return this.projects.get(project.id);
+    return this.projects.get(project.id, user);
   }
 }

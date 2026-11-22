@@ -80,15 +80,15 @@ The same workspace also runs the business around the productions. Each module is
 
 ```mermaid
 flowchart LR
-  B[Browser] -->|pages, /api/* rewrite, SSE| W["apps/web<br/>Next.js 16 · React 19"]
-  W -->|same-origin proxy| A["apps/api<br/>NestJS 11"]
-  A --> D[(PostgreSQL 18<br/>Prisma 7)]
+  B[Browser] -->|pages, /api/*, SSE| W["apps/web<br/>Next.js 16 · React 19"]
+  W -->|"pages/api/[...path] (in-process)"| A["apps/api<br/>NestJS 11"]
+  A --> D[(MongoDB Atlas<br/>Mongoose 9 · GridFS)]
   A -. optional .-> C[[Claude API]]
   S["packages/shared<br/>Zod contracts · domain rules"] --- W
   S --- A
 ```
 
-- **Same origin**: the browser only talks to Next.js; `/api/*` is rewritten to NestJS, so the session cookie is first-party and there is no CORS ([ADR-0002](docs/decisions/0002-nestjs-api-behind-next-rewrite.md)).
+- **One app, one origin**: the NestJS API runs inside the Next.js app (a catch-all `pages/api` route boots it once per server instance), so the product deploys as a single Vercel project, the session cookie is first-party and there is no CORS ([ADR-0014](docs/decisions/0014-mongodb-and-single-vercel-app.md)).
 - **One source of rules**: workflow guards, health scoring, flow metrics, conflict detection and attention ranking are pure functions in `packages/shared`, unit-tested once and used by both API and UI ([ADR-0007](docs/decisions/0007-shared-zod-contracts.md)).
 - **Audit by construction**: every state change writes its activity row in the same transaction, then publishes it over SSE ([ADR-0006](docs/decisions/0006-sse-for-realtime.md)).
 
@@ -96,8 +96,8 @@ flowchart LR
 | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Web     | Next.js 16 (App Router, Turbopack), React 19, TypeScript 6, Tailwind CSS 4, Radix UI, cmdk, TanStack Query, Zustand, Motion, Recharts, React Flow (@xyflow/react), React Hook Form |
 | API     | NestJS 11, Zod validation, cookie sessions, RBAC guards, throttling, SSE, Anthropic SDK                                                                                            |
-| Data    | PostgreSQL 18, Prisma 7 (driver adapter), embedded PostgreSQL for local dev                                                                                                        |
-| Tooling | pnpm workspaces, Turborepo, ESLint, Prettier, Vitest, Supertest, Playwright                                                                                                        |
+| Data    | MongoDB Atlas, Mongoose 9 (multi-document transactions, virtual-populate relations), GridFS for documents                                                                          |
+| Tooling | pnpm workspaces, Turborepo, ESLint, Prettier, Vitest, Supertest, Playwright; deployed on Vercel                                                                                    |
 
 More: [system architecture](docs/architecture/01-system-architecture.md) · [domain model & formulas](docs/architecture/02-domain-model.md) · [repository structure](docs/architecture/03-folder-structure.md) · [design system](docs/design/01-design-system.md) · [API reference](docs/api/README.md) · [decision records](docs/decisions/README.md)
 
@@ -106,75 +106,73 @@ More: [system architecture](docs/architecture/01-system-architecture.md) · [dom
 ```
 nova/
 ├── apps/
-│   ├── web/          Next.js workspace — features/ (one folder per lens, inspector, assistant…), components/, lib/, store/
+│   ├── web/          Next.js workspace — features/ (one folder per lens, inspector, assistant…), components/, lib/, store/, pages/api (serves the API)
 │   └── api/          NestJS API — auth/, common/, config/, database/, modules/ (domain + assistant), test/
 ├── packages/
 │   ├── shared/       Zod request schemas, response types, enums, pure domain rules (+ unit tests)
-│   ├── db/           Prisma schema, migrations, seed (demo studio), password hashing, client factory
+│   ├── db/           Mongoose models, connection & transaction helpers, GridFS storage, seed (demo studio), password hashing
 │   └── config/       Shared tsconfig and ESLint presets
 ├── tests/e2e/        Playwright journeys (system Chrome) and screenshot capture
-├── scripts/          Embedded PostgreSQL launcher, Docker init SQL
 └── docs/             research · architecture · design · decisions · api · development · screenshots
 ```
 
 ## Getting started
 
-**Prerequisites:** Node.js ≥ 24.7, pnpm 10. No Docker or PostgreSQL install needed.
+**Prerequisites:** Node.js ≥ 24.7, pnpm 10, and a MongoDB Atlas cluster (the free M0 tier works). No local database install.
 
 ```bash
 pnpm install
-cp .env.example .env          # then set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD (12+ characters)
+cp .env.example .env          # set DATABASE_URL / TEST_DATABASE_URL (Atlas) and SEED_ADMIN_* (12+ char password)
 
-pnpm db:start                 # terminal 1 — embedded PostgreSQL 18 on :54329 (UTF-8), keep running
-pnpm db:deploy                # apply migrations
-pnpm db:seed                  # load the demonstration studio (wipes existing data)
+pnpm db:seed                  # creates collections + indexes, loads the demonstration studio (wipes existing data)
 
-pnpm dev                      # terminal 2 — API on :4000, web (Studio) on :3100 (watch mode)
+pnpm dev                      # Studio and API on :3100 (the API is served at /api by the web app)
 ```
 
 Open <http://localhost:3100/studio> and sign in with the `SEED_ADMIN_*` credentials (Super Admin). The seed also prints one-time passwords for demo accounts, one per working role, so you can see role-based access: `producer@nova.local` (Production Manager), `finance@nova.local` (Finance), `hr@nova.local` (HR), `creative@nova.local` (Creative Team) and `viewer@nova.local` (Guest, read-only). Passwords change on every seed.
 
-Alternatives: `docker compose up -d` instead of `pnpm db:start`, or point `DATABASE_URL` at any PostgreSQL 14+.
+Any MongoDB 7+ **replica set** works too (transactions need one). To run the API on its own, start it with `pnpm --filter @nova/api start` (port `API_PORT`) and set `API_INTERNAL_URL` so the web app forwards `/api/*` to it.
+
+**Deploying:** see [Deploying to Vercel](docs/deployment/vercel.md). Production variables are listed in [`.env.production.example`](.env.production.example).
 
 ### Environment
 
-| Variable                                                     | Purpose                                                               |
-| ------------------------------------------------------------ | --------------------------------------------------------------------- |
-| `DATABASE_URL`, `TEST_DATABASE_URL`                          | Development and integration-test databases                            |
-| `API_PORT`, `API_INTERNAL_URL`, `WEB_ORIGIN`                 | Ports and the allowed origin for state-changing requests              |
-| `SESSION_TTL_HOURS`, `SESSION_IDLE_HOURS`                    | Absolute (7 days) and idle (8 hours) session limits                   |
-| `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_ADMIN_NAME` | Initial administrator — never committed                               |
-| `ANTHROPIC_API_KEY`, `ASSISTANT_MODEL`                       | Optional: enable the Claude provider                                  |
-| `NOVA_PG_DATA_DIR`                                           | Optional: embedded database location (default outside the repository) |
-| `NOVA_STORAGE_DIR`                                           | Optional: private document storage (default outside the repository)   |
+| Variable                                                     | Purpose                                                                  |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `DATABASE_URL`, `TEST_DATABASE_URL`                          | MongoDB connection strings (development and integration-test databases)  |
+| `WEB_ORIGIN`                                                 | Allowed origin(s) for state-changing requests (https only in production) |
+| `API_INTERNAL_URL`, `API_PORT`                               | Optional: run the API as a separate server                               |
+| `SESSION_TTL_HOURS`, `SESSION_IDLE_HOURS`                    | Absolute (7 days) and idle (8 hours) session limits                      |
+| `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_ADMIN_NAME` | Initial administrator — never committed                                  |
+| `ANTHROPIC_API_KEY`, `ASSISTANT_MODEL`                       | Optional: enable the Claude provider                                     |
 
 The API validates its environment at start-up and refuses to run with a helpful message if anything is missing.
 
 ### Scripts
 
-| Command                                                               | What it does                                                                                                                                 |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`                                                            | Shared/db packages in watch mode, API with reload, Next.js dev server                                                                        |
-| `pnpm build`                                                          | Production build of every package and app                                                                                                    |
-| `pnpm typecheck` / `pnpm lint`                                        | Across the monorepo (Turborepo-cached)                                                                                                       |
-| `pnpm test`                                                           | Unit, component and API integration tests (needs the database running)                                                                       |
-| `pnpm test:e2e`                                                       | Playwright journeys and accessibility audits against running apps on :3100/:4000 (re-seeds the dev database; `E2E_SKIP_SEED=1` to keep data) |
-| `pnpm screenshots`                                                    | Regenerates `docs/screenshots`                                                                                                               |
-| `pnpm db:start` · `db:deploy` · `db:migrate` · `db:seed` · `db:reset` | Database lifecycle                                                                                                                           |
+| Command                                  | What it does                                                                                                                              |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                               | Shared/db/API packages in watch mode, Next.js dev server serving the Studio and the API (restart it to load API changes)                  |
+| `pnpm build`                             | Production build of every package and app                                                                                                 |
+| `pnpm typecheck` / `pnpm lint`           | Across the monorepo (Turborepo-cached)                                                                                                    |
+| `pnpm test`                              | Unit, component and API integration tests (needs the database running)                                                                    |
+| `pnpm test:e2e`                          | Playwright journeys and accessibility audits against the running app on :3100 (re-seeds the dev database; `E2E_SKIP_SEED=1` to keep data) |
+| `pnpm screenshots`                       | Regenerates `docs/screenshots`                                                                                                            |
+| `pnpm db:setup` · `db:seed` · `db:reset` | Create collections and indexes · load (wipe + seed) the demo studio                                                                       |
 
 ## Testing
 
 Verified on the final build:
 
-| Suite                | Tool                                | Tests | Covers                                                                                                                                                                                                                         |
-| -------------------- | ----------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Domain rules         | Vitest                              | 37    | Transition guards, progress, cycles, health scoring, conflicts, utilisation, flow & constraint, attention ranking, language parsing                                                                                            |
-| API integration      | Vitest + Supertest, real PostgreSQL | 37    | Auth (cookies, hashing, expiry, idle, deactivation, CSRF, rate limit, audit), RBAC, validation and error envelope, workflow engine, dependencies, booking conflicts, review loop, assistant propose / confirm / cancel / stale |
-| Web unit & component | Vitest + Testing Library            | 13    | URL state, workspace store, formatting, panel loading / error / empty states                                                                                                                                                   |
-| End-to-end           | Playwright (system Chrome)          | 14    | Sign-in/out and route protection, the five demo journeys, command palette, business lens, phone layout, screenshot capture                                                                                                     |
-| Accessibility        | axe-core via Playwright             | 13    | WCAG 2.1 A/AA on login, all seven lenses, inspector and palette, plus three lenses in the light theme — no serious or critical violations                                                                                      |
+| Suite                | Tool                             | Tests | Covers                                                                                                                                                                                                                         |
+| -------------------- | -------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Domain rules         | Vitest                           | 37    | Transition guards, progress, cycles, health scoring, conflicts, utilisation, flow & constraint, attention ranking, language parsing                                                                                            |
+| API integration      | Vitest + Supertest, real MongoDB | 37    | Auth (cookies, hashing, expiry, idle, deactivation, CSRF, rate limit, audit), RBAC, validation and error envelope, workflow engine, dependencies, booking conflicts, review loop, assistant propose / confirm / cancel / stale |
+| Web unit & component | Vitest + Testing Library         | 13    | URL state, workspace store, formatting, panel loading / error / empty states                                                                                                                                                   |
+| End-to-end           | Playwright (system Chrome)       | 14    | Sign-in/out and route protection, the five demo journeys, command palette, business lens, phone layout, screenshot capture                                                                                                     |
+| Accessibility        | axe-core via Playwright          | 13    | WCAG 2.1 A/AA on login, all seven lenses, inspector and palette, plus three lenses in the light theme — no serious or critical violations                                                                                      |
 
-API integration tests run against the **compiled** API (`dist/`) on a separate `nova_test` database, so they exercise exactly what ships, including NestJS decorator metadata.
+API integration tests run against the **compiled** API (`dist/`) on a separate test database (`TEST_DATABASE_URL`), so they exercise exactly what ships, including NestJS decorator metadata.
 
 ## Security
 
@@ -196,7 +194,7 @@ The Neon Minds website was used for the company's name, services, project-type v
 
 ## Limitations
 
-Finance is a demonstration ledger, not an accounting system: no double entry, tax filing or payment reversal yet. Payroll is out of scope. Media review is text-based (no video player); clients do not log in (the studio records their decisions); one API instance (SSE is in-process); health and flow are computed in memory — fine for a studio's working set. Development notes, issues met during the build and planned improvements: [roadmap](docs/development/roadmap.md).
+Finance is a demonstration ledger, not an accounting system: no double entry, tax filing or payment reversal yet. Payroll is out of scope. Media review is text-based (no video player); clients do not log in (the studio records their decisions); live updates (SSE) reach clients connected to the same server instance — on Vercel other clients catch up when their stream reconnects; health and flow are computed in memory — fine for a studio's working set. Development notes, issues met during the build and planned improvements: [roadmap](docs/development/roadmap.md).
 
 ## Documentation
 

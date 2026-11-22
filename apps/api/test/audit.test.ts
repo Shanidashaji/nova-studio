@@ -6,22 +6,31 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { INestApplication } from '@nestjs/common';
-import type { PrismaClient } from '@nova/db';
+import type { Asset, Client, Database, Project } from '@nova/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { stageApproved } from '../src/modules/projects/project.mapper';
 import { shootDaysWithin } from '../src/modules/team/team.service';
-import { ADMIN, CREATIVE, ORIGIN, bootApp, setKnownPasswords, signIn, testDb } from './helpers';
+import {
+  ADMIN,
+  CREATIVE,
+  ORIGIN,
+  bootApp,
+  found,
+  setKnownPasswords,
+  signIn,
+  testDb,
+} from './helpers';
 
 type Agent = Awaited<ReturnType<typeof signIn>>;
 
 let app: INestApplication;
-let db: PrismaClient;
+let db: Database;
 let admin: Agent;
 let creative: Agent;
 
 beforeAll(async () => {
   app = await bootApp();
-  db = testDb();
+  db = await testDb();
   await setKnownPasswords(db);
   admin = await signIn(app, ADMIN);
   creative = await signIn(app, CREATIVE);
@@ -29,7 +38,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
-  await db?.$disconnect();
+  await db?.close();
 });
 
 const post = (a: Agent, url: string, body?: object) =>
@@ -40,7 +49,8 @@ const post = (a: Agent, url: string, body?: object) =>
 const patch = (a: Agent, url: string, body: object) =>
   a.patch(`/api/v1${url}`).set('origin', ORIGIN).send(body);
 const get = (a: Agent, url: string) => a.get(`/api/v1${url}`);
-const project = (code: string) => db.project.findUniqueOrThrow({ where: { code } });
+const project = (code: string) =>
+  found(db.models.Project.findOne({ code }).lean<Project>(), `Project ${code}`);
 const day = (offset: number, hour = 9) => {
   const d = new Date(Date.UTC(2031, 0, 10 + offset, hour));
   return d.toISOString();
@@ -134,7 +144,7 @@ describe('request validation', () => {
     expect(res.status).toBe(201);
     expect(res.body.assignee).toBeNull();
     expect(res.body.dueDate).toBeNull();
-    await db.task.delete({ where: { id: res.body.id } });
+    await db.deleteCascade('Task', { _id: res.body.id });
   });
 
   it('rejects null, numbers and booleans where a date is required', async () => {
@@ -188,7 +198,9 @@ describe('project status rules', () => {
   });
 
   it('cannot reopen a delivered project by editing it', async () => {
-    const delivered = await db.project.findFirstOrThrow({ where: { status: 'DELIVERED' } });
+    const delivered = await found(
+      db.models.Project.findOne({ status: 'DELIVERED' }).sort({ $natural: 1 }).lean<Project>(),
+    );
     const res = await patch(admin, `/projects/${delivered.id}`, { status: 'ACTIVE' });
     expect(res.status).toBe(422);
     expect(res.body.error.code).toBe('PROJECT_DELIVERED');
@@ -284,7 +296,9 @@ describe('scheduling integrity', () => {
     expect(a.status).toBe(201);
     expect(b.status).toBe(201);
 
-    const asset = await db.asset.findFirstOrThrow({ where: { status: 'AVAILABLE' } });
+    const asset = await found(
+      db.models.Asset.findOne({ status: 'AVAILABLE' }).sort({ $natural: 1 }).lean<Asset>(),
+    );
     for (const s of [a, b]) {
       const booked = await post(admin, `/shoots/${s.body.id}/bookings`, { assetId: asset.id });
       expect(booked.status).toBe(201);
@@ -304,20 +318,22 @@ describe('scheduling integrity', () => {
 
     // Nothing more can be booked for a cancelled shoot.
     expect((await patch(admin, `/shoots/${a.body.id}`, { status: 'CANCELLED' })).status).toBe(200);
-    const other = await db.asset.findFirstOrThrow({
-      where: { status: 'AVAILABLE', id: { not: asset.id } },
-    });
+    const other = await found(
+      db.models.Asset.findOne({ status: 'AVAILABLE', _id: { $ne: asset.id } })
+        .sort({ $natural: 1 })
+        .lean<Asset>(),
+    );
     const late = await post(admin, `/shoots/${a.body.id}/bookings`, { assetId: other.id });
     expect(late.status).toBe(422);
     expect(late.body.error.code).toBe('SHOOT_CLOSED');
 
-    await db.shoot.deleteMany({ where: { id: { in: [a.body.id, b.body.id] } } });
+    await db.deleteCascade('Shoot', { _id: { $in: [a.body.id, b.body.id] } });
   });
 });
 
 describe('clients', () => {
   it('refuses a second client with the same name, whatever the capitalisation', async () => {
-    const existing = await db.client.findFirstOrThrow();
+    const existing = await found(db.models.Client.findOne().sort({ $natural: 1 }).lean<Client>());
     const res = await post(admin, '/clients', {
       name: existing.name.toUpperCase(),
       industry: 'Audit',

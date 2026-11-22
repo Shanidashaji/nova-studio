@@ -1,6 +1,22 @@
-import fs from 'node:fs';
 import { Injectable } from '@nestjs/common';
-import { putObject, removeObject, resolveStorageDir, storagePath, type Prisma } from '@nova/db';
+import {
+  openObject,
+  putObject,
+  RecordNotFoundError,
+  removeObject,
+  type Client,
+  type Document,
+  type DocumentVersion,
+  type Expense,
+  type Invoice,
+  type Lead,
+  type PopulateOptions,
+  type Project,
+  type PurchaseOrder,
+  type TeamMember,
+  type User,
+  type Vendor,
+} from '@nova/db';
 import type {
   CreateDocument,
   DocumentDetail,
@@ -9,27 +25,47 @@ import type {
   SessionUser,
 } from '@nova/shared';
 import { notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { containsI } from '../../common/query';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { iso } from '../projects/project.mapper';
 import { normaliseMime, rejectReason, safeFileName, type UploadedFile } from './file-type';
 
-const versionInclude = { uploadedBy: { select: { id: true, name: true } } } as const;
+type Ref<T extends { _id: string; id: string }, K extends keyof T> = Pick<T, '_id' | 'id' | K>;
 
-const documentInclude = {
-  project: { select: { id: true, code: true, title: true } },
-  client: { select: { id: true, name: true } },
-  lead: { select: { id: true, title: true } },
-  vendor: { select: { id: true, name: true } },
-  teamMember: { select: { id: true, name: true } },
-  invoice: { select: { id: true, number: true } },
-  expense: { select: { id: true, number: true } },
-  purchaseOrder: { select: { id: true, number: true } },
-  createdBy: { select: { id: true, name: true } },
-  versions: { orderBy: { version: 'desc' }, include: versionInclude },
-} satisfies Prisma.DocumentInclude;
+const documentPopulate: PopulateOptions[] = [
+  { path: 'project', select: { code: 1, title: 1 } },
+  { path: 'client', select: { name: 1 } },
+  { path: 'lead', select: { title: 1 } },
+  { path: 'vendor', select: { name: 1 } },
+  { path: 'teamMember', select: { name: 1 } },
+  { path: 'invoice', select: { number: 1 } },
+  { path: 'expense', select: { number: 1 } },
+  { path: 'purchaseOrder', select: { number: 1 } },
+  { path: 'createdBy', select: { name: 1 } },
+  {
+    path: 'versions',
+    options: { sort: { version: -1 } },
+    populate: { path: 'uploadedBy', select: { name: 1 } },
+  },
+];
 
-type DocumentRow = Prisma.DocumentGetPayload<{ include: typeof documentInclude }>;
+type DocumentRow = Document & {
+  project: Ref<Project, 'code' | 'title'> | null;
+  client: Ref<Client, 'name'> | null;
+  lead: Ref<Lead, 'title'> | null;
+  vendor: Ref<Vendor, 'name'> | null;
+  teamMember: Ref<TeamMember, 'name'> | null;
+  invoice: Ref<Invoice, 'number'> | null;
+  expense: Ref<Expense, 'number'> | null;
+  purchaseOrder: Ref<PurchaseOrder, 'number'> | null;
+  createdBy: Ref<User, 'name'>;
+  versions: (DocumentVersion & { uploadedBy: Ref<User, 'name'> })[];
+};
+
+const named = (r: { id: string; name: string } | null) => (r ? { id: r.id, name: r.name } : null);
+const numbered = (r: { id: string; number: string } | null) =>
+  r ? { id: r.id, number: r.number } : null;
 
 const toVersion = (v: DocumentRow['versions'][number]) => ({
   version: v.version,
@@ -38,7 +74,7 @@ const toVersion = (v: DocumentRow['versions'][number]) => ({
   sizeBytes: v.sizeBytes,
   sha256: v.sha256,
   note: v.note,
-  uploadedBy: v.uploadedBy,
+  uploadedBy: { id: v.uploadedBy.id, name: v.uploadedBy.name },
   createdAt: iso(v.createdAt),
 });
 
@@ -51,16 +87,16 @@ const toView = (d: DocumentRow): DocumentView => ({
   currentVersion: d.currentVersion,
   latest: d.versions[0] ? toVersion(d.versions[0]) : null,
   links: {
-    project: d.project,
-    client: d.client,
-    lead: d.lead,
-    vendor: d.vendor,
-    member: d.teamMember,
-    invoice: d.invoice,
-    expense: d.expense,
-    purchaseOrder: d.purchaseOrder,
+    project: d.project ? { id: d.project.id, code: d.project.code, title: d.project.title } : null,
+    client: named(d.client),
+    lead: d.lead ? { id: d.lead.id, title: d.lead.title } : null,
+    vendor: named(d.vendor),
+    member: named(d.teamMember),
+    invoice: numbered(d.invoice),
+    expense: numbered(d.expense),
+    purchaseOrder: numbered(d.purchaseOrder),
   },
-  createdBy: d.createdBy,
+  createdBy: { id: d.createdBy.id, name: d.createdBy.name },
   createdAt: iso(d.createdAt),
   updatedAt: iso(d.updatedAt),
 });
@@ -77,65 +113,64 @@ const LINK_KEYS = [
 ] as const;
 
 /**
- * Document repository (ADR-0012). Files are stored privately under random keys and streamed only
- * after a permission check; confidential documents need `document:confidential`, HR documents
- * also need `hr:read`, and finance-linked documents need `finance:read`.
+ * Document repository (ADR-0012). Files are stored privately (MongoDB GridFS) under random keys
+ * and streamed only after a permission check; confidential documents need
+ * `document:confidential`, HR documents also need `hr:read`, and finance-linked documents need
+ * `finance:read`.
  */
 @Injectable()
 export class DocumentsService {
-  private readonly dir = resolveStorageDir();
-
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
-  /** Row-level visibility for the signed-in user. */
-  private visibility(user: SessionUser): Prisma.DocumentWhereInput {
+  /** Row-level visibility for the signed-in user (conditions to AND into every query). */
+  private visibility(user: SessionUser): Record<string, unknown>[] {
     const p = user.permissions;
-    return {
-      AND: [
-        p.includes('document:confidential') ? {} : { confidential: false },
-        p.includes('hr:read') ? {} : { category: { not: 'HR' } },
-        p.includes('finance:read')
-          ? {}
-          : { invoiceId: null, expenseId: null, category: { notIn: ['INVOICE', 'RECEIPT'] } },
-      ],
-    };
+    return [
+      p.includes('document:confidential') ? {} : { confidential: false },
+      p.includes('hr:read') ? {} : { category: { $ne: 'HR' } },
+      p.includes('finance:read')
+        ? {}
+        : { invoiceId: null, expenseId: null, category: { $nin: ['INVOICE', 'RECEIPT'] } },
+    ];
   }
 
   async list(q: DocumentListQuery, user: SessionUser): Promise<DocumentView[]> {
+    const { Document, DocumentVersion } = this.database.models;
     const links = Object.fromEntries(LINK_KEYS.filter((k) => q[k]).map((k) => [k, q[k]]));
-    const rows = await this.prisma.db.document.findMany({
-      where: {
-        AND: [
-          this.visibility(user),
-          links,
-          q.category ? { category: q.category } : {},
-          q.q
-            ? {
-                OR: [
-                  { title: { contains: q.q, mode: 'insensitive' } },
-                  { description: { contains: q.q, mode: 'insensitive' } },
-                  { versions: { some: { fileName: { contains: q.q, mode: 'insensitive' } } } },
-                ],
-              }
-            : {},
-        ],
-      },
-      include: { ...documentInclude, versions: { ...documentInclude.versions, take: 1 } },
-      orderBy: { updatedAt: 'desc' },
-      take: 200,
-    });
+    const search = q.q
+      ? {
+          $or: [
+            { title: containsI(q.q) },
+            { description: containsI(q.q) },
+            {
+              _id: {
+                $in: await DocumentVersion.distinct('documentId', { fileName: containsI(q.q) }),
+              },
+            },
+          ],
+        }
+      : {};
+    // Every version is populated (newest first); the list shows only the latest.
+    const rows = await Document.find({
+      $and: [...this.visibility(user), links, q.category ? { category: q.category } : {}, search],
+    })
+      .sort({ updatedAt: -1 })
+      .limit(200)
+      .populate(documentPopulate)
+      .lean<DocumentRow[]>();
     return rows.map(toView);
   }
 
   private async find(id: string, user: SessionUser) {
     // Hidden documents are reported as not found rather than forbidden: no existence leak.
-    const d = await this.prisma.db.document.findFirst({
-      where: { AND: [{ id }, this.visibility(user)] },
-      include: documentInclude,
-    });
+    const d = await this.database.models.Document.findOne({
+      $and: [{ _id: id }, ...this.visibility(user)],
+    })
+      .populate(documentPopulate)
+      .lean<DocumentRow>();
     if (!d) throw notFound('Document');
     return d;
   }
@@ -146,41 +181,18 @@ export class DocumentsService {
   }
 
   private async validateLinks(input: CreateDocument, user: SessionUser) {
+    const m = this.database.models;
     const checks: [string | undefined, () => Promise<unknown>, string][] = [
-      [
-        input.projectId,
-        () => this.prisma.db.project.findUnique({ where: { id: input.projectId } }),
-        'project',
-      ],
-      [
-        input.clientId,
-        () => this.prisma.db.client.findUnique({ where: { id: input.clientId } }),
-        'client',
-      ],
-      [input.leadId, () => this.prisma.db.lead.findUnique({ where: { id: input.leadId } }), 'lead'],
-      [
-        input.vendorId,
-        () => this.prisma.db.vendor.findUnique({ where: { id: input.vendorId } }),
-        'vendor',
-      ],
-      [
-        input.teamMemberId,
-        () => this.prisma.db.teamMember.findUnique({ where: { id: input.teamMemberId } }),
-        'team member',
-      ],
-      [
-        input.invoiceId,
-        () => this.prisma.db.invoice.findUnique({ where: { id: input.invoiceId } }),
-        'invoice',
-      ],
-      [
-        input.expenseId,
-        () => this.prisma.db.expense.findUnique({ where: { id: input.expenseId } }),
-        'expense',
-      ],
+      [input.projectId, () => m.Project.exists({ _id: input.projectId }), 'project'],
+      [input.clientId, () => m.Client.exists({ _id: input.clientId }), 'client'],
+      [input.leadId, () => m.Lead.exists({ _id: input.leadId }), 'lead'],
+      [input.vendorId, () => m.Vendor.exists({ _id: input.vendorId }), 'vendor'],
+      [input.teamMemberId, () => m.TeamMember.exists({ _id: input.teamMemberId }), 'team member'],
+      [input.invoiceId, () => m.Invoice.exists({ _id: input.invoiceId }), 'invoice'],
+      [input.expenseId, () => m.Expense.exists({ _id: input.expenseId }), 'expense'],
       [
         input.purchaseOrderId,
-        () => this.prisma.db.purchaseOrder.findUnique({ where: { id: input.purchaseOrderId } }),
+        () => m.PurchaseOrder.exists({ _id: input.purchaseOrderId }),
         'purchase order',
       ],
     ];
@@ -220,31 +232,41 @@ export class DocumentsService {
     return mime;
   }
 
+  /** Deletes a stored file whose record never committed; the original error is what matters. */
+  private async discard(storageKey: string) {
+    await removeObject(this.database.database, storageKey).catch(() => undefined);
+  }
+
   async create(input: CreateDocument, file: UploadedFile | undefined, user: SessionUser) {
     const mime = this.checkFile(file);
     await this.validateLinks(input, user);
-    const stored = await putObject(this.dir, file!.buffer);
+    const { Document, DocumentVersion } = this.database.models;
+    // Stored before (and outside) the transaction, which MongoDB may retry.
+    const stored = await putObject(this.database.database, file!.buffer, mime);
+    let id: string;
     try {
       const { note, ...meta } = input;
-      const id = await this.activity.transaction(async (tx, log) => {
-        const d = await tx.document.create({
-          data: {
-            ...meta,
+      id = await this.activity.transaction(async (log) => {
+        const d = (
+          await Document.create({
+            title: meta.title,
+            category: meta.category,
+            description: meta.description ?? null,
+            ...Object.fromEntries(LINK_KEYS.map((k) => [k, meta[k] ?? null])),
             // HR documents are always confidential.
             confidential: meta.confidential || meta.category === 'HR',
             currentVersion: 1,
             createdById: user.id,
-            versions: {
-              create: {
-                version: 1,
-                fileName: safeFileName(file!.originalname),
-                mimeType: mime,
-                note,
-                uploadedById: user.id,
-                ...stored,
-              },
-            },
-          },
+          })
+        ).toObject<Document>();
+        await DocumentVersion.create({
+          documentId: d.id,
+          version: 1,
+          fileName: safeFileName(file!.originalname),
+          mimeType: mime,
+          note: note ?? null,
+          uploadedById: user.id,
+          ...stored,
         });
         await log({
           actorId: user.id,
@@ -256,11 +278,11 @@ export class DocumentsService {
         });
         return d.id;
       });
-      return this.get(id, user);
     } catch (error) {
-      await removeObject(this.dir, stored.storageKey); // no orphaned files on failure
+      await this.discard(stored.storageKey); // no orphaned files on failure
       throw error;
     }
+    return this.get(id, user);
   }
 
   async addVersion(
@@ -271,24 +293,25 @@ export class DocumentsService {
   ) {
     const doc = await this.find(id, user);
     const mime = this.checkFile(file);
-    const stored = await putObject(this.dir, file!.buffer);
+    const { Document, DocumentVersion } = this.database.models;
+    const stored = await putObject(this.database.database, file!.buffer, mime);
     try {
-      await this.activity.transaction(async (tx, log) => {
-        await tx.$queryRaw`SELECT id FROM "Document" WHERE id = ${id} FOR UPDATE`;
-        const current = await tx.document.findUniqueOrThrow({ where: { id } });
+      await this.activity.transaction(async (log) => {
+        // Serialises concurrent uploads so version numbers stay unique and gapless.
+        await this.database.lock('Document', id);
+        const current = await Document.findById(id).lean<Document>();
+        if (!current) throw new RecordNotFoundError('Document');
         const version = current.currentVersion + 1;
-        await tx.documentVersion.create({
-          data: {
-            documentId: id,
-            version,
-            fileName: safeFileName(file!.originalname),
-            mimeType: mime,
-            note,
-            uploadedById: user.id,
-            ...stored,
-          },
+        await DocumentVersion.create({
+          documentId: id,
+          version,
+          fileName: safeFileName(file!.originalname),
+          mimeType: mime,
+          note: note ?? null,
+          uploadedById: user.id,
+          ...stored,
         });
-        await tx.document.update({ where: { id }, data: { currentVersion: version } });
+        await Document.updateOne({ _id: id }, { $set: { currentVersion: version } });
         await log({
           actorId: user.id,
           action: 'document.versioned',
@@ -299,7 +322,7 @@ export class DocumentsService {
         });
       });
     } catch (error) {
-      await removeObject(this.dir, stored.storageKey);
+      await this.discard(stored.storageKey);
       throw error;
     }
     return this.get(id, user);
@@ -308,14 +331,15 @@ export class DocumentsService {
   /** Resolves a version to a readable stream after the same visibility check as reading it. */
   async open(id: string, version: number, user: SessionUser) {
     await this.find(id, user);
-    const v = await this.prisma.db.documentVersion.findUnique({
-      where: { documentId_version: { documentId: id, version } },
-    });
+    const v = await this.database.models.DocumentVersion.findOne({
+      documentId: id,
+      version,
+    }).lean<DocumentVersion>();
     if (!v) throw notFound('Document version');
-    const file = storagePath(this.dir, v.storageKey);
-    if (!fs.existsSync(file)) throw notFound('Stored file');
+    const stream = await openObject(this.database.database, v.storageKey);
+    if (!stream) throw notFound('Stored file');
     return {
-      stream: fs.createReadStream(file),
+      stream,
       fileName: v.fileName,
       mimeType: v.mimeType,
       sizeBytes: v.sizeBytes,

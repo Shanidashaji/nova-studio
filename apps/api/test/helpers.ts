@@ -1,5 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
-import { createPrismaClient, hashPassword, type PrismaClient } from '@nova/db';
+import { connectDatabase, hashPassword, type Database } from '@nova/db';
 import type { Server } from 'node:http';
 import request from 'supertest';
 
@@ -21,18 +21,25 @@ export async function bootApp(): Promise<INestApplication> {
   return app;
 }
 
-/** Direct database access for arranging and asserting test state. */
-export function testDb(): PrismaClient {
-  return createPrismaClient(process.env.TEST_DATABASE_URL);
+/** Direct database access for arranging and asserting test state. Close it in afterAll. */
+export function testDb(): Promise<Database> {
+  return connectDatabase(process.env.TEST_DATABASE_URL, { maxPoolSize: 2 });
+}
+
+/** Awaits a lean read and fails the test when nothing matched (the former `…OrThrow`). */
+export async function found<T>(query: PromiseLike<T | null>, what = 'Record'): Promise<T> {
+  const value = await query;
+  if (value === null || value === undefined) throw new Error(`${what} not found.`);
+  return value;
 }
 
 /** The seed generates random demo passwords; tests set known ones. */
-export async function setKnownPasswords(db: PrismaClient) {
+export async function setKnownPasswords(db: Database) {
   for (const u of [PRODUCER, VIEWER, FINANCE, HR, CREATIVE]) {
-    await db.user.update({
-      where: { email: u.email },
-      data: { passwordHash: await hashPassword(u.password) },
-    });
+    await db.models.User.updateOne(
+      { email: u.email },
+      { $set: { passwordHash: await hashPassword(u.password) } },
+    );
   }
 }
 

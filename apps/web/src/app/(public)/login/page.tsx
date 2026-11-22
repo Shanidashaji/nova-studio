@@ -70,14 +70,6 @@ export default async function LoginPage({
               ) : null}
               <LoginForm next={next} />
             </div>
-
-            <p className="mt-5 px-1 text-xs leading-5 text-text-3">
-              Demo environment. The administrator account is created by the database seed from
-              <span className="font-mono text-text-2"> SEED_ADMIN_EMAIL</span> and
-              <span className="font-mono text-text-2"> SEED_ADMIN_PASSWORD</span> in your local
-              <span className="font-mono text-text-2"> .env</span>. All studio data inside is
-              demonstration data.
-            </p>
           </div>
         </section>
       </div>

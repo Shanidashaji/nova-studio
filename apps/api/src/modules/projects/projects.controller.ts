@@ -16,14 +16,17 @@ export class ProjectsController {
 
   @Get()
   @RequirePermissions('workspace:read')
-  list(@Query(new ZodValidationPipe(ProjectListQuery)) query: ProjectListQuery) {
-    return this.projects.list(query);
+  list(
+    @Query(new ZodValidationPipe(ProjectListQuery)) query: ProjectListQuery,
+    @CurrentUser() user: SessionUser,
+  ) {
+    return this.projects.list(query, user);
   }
 
   @Get(':id')
   @RequirePermissions('workspace:read')
-  get(@Param('id') id: string) {
-    return this.projects.get(id);
+  get(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.projects.get(id, user);
   }
 
   @Post()

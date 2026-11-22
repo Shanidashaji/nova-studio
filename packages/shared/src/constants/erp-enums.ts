@@ -182,7 +182,8 @@ export const DOCUMENT_MIME_TYPES = [
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ] as const;
-export const DOCUMENT_MAX_BYTES = 20 * 1024 * 1024;
+/** 4 MB: under Vercel's 4.5 MB request-body limit for functions, with room for the multipart envelope. */
+export const DOCUMENT_MAX_BYTES = 4 * 1024 * 1024;
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 

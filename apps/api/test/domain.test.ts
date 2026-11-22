@@ -1,17 +1,37 @@
 import type { INestApplication } from '@nestjs/common';
-import type { PrismaClient } from '@nova/db';
+import type {
+  Approval,
+  Asset,
+  Database,
+  Deliverable,
+  Project,
+  ProjectStage,
+  RevisionRound,
+  Shoot,
+  StageDefinition,
+  Task,
+} from '@nova/db';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ADMIN, ORIGIN, VIEWER, bootApp, setKnownPasswords, signIn, testDb } from './helpers';
+import {
+  ADMIN,
+  ORIGIN,
+  VIEWER,
+  bootApp,
+  found,
+  setKnownPasswords,
+  signIn,
+  testDb,
+} from './helpers';
 
 let app: INestApplication;
-let db: PrismaClient;
+let db: Database;
 let admin: Awaited<ReturnType<typeof signIn>>;
 let viewer: Awaited<ReturnType<typeof signIn>>;
 
 beforeAll(async () => {
   app = await bootApp();
-  db = testDb();
+  db = await testDb();
   await setKnownPasswords(db);
   admin = await signIn(app, ADMIN);
   viewer = await signIn(app, VIEWER);
@@ -19,10 +39,22 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
-  await db?.$disconnect();
+  await db?.close();
 });
 
-const project = (code: string) => db.project.findUniqueOrThrow({ where: { code } });
+const project = (code: string) =>
+  found(db.models.Project.findOne({ code }).lean<Project>(), `Project ${code}`);
+
+type ProjectWithStages = Project & {
+  stages: (ProjectStage & { stageDefinition: StageDefinition })[];
+};
+const projectWithStages = (code: string) =>
+  found(
+    db.models.Project.findOne({ code })
+      .populate({ path: 'stages', populate: { path: 'stageDefinition' } })
+      .lean<ProjectWithStages>(),
+    `Project ${code}`,
+  );
 
 describe('pulse and read models', () => {
   it('returns the spine, a ranked attention queue and totals', async () => {
@@ -114,16 +146,14 @@ describe('workflow engine', () => {
   });
 
   it('advances once blocking work is done, records history and audit', async () => {
-    const p = await db.project.findUniqueOrThrow({
-      where: { code: 'NM-26-040' },
-      include: { stages: { include: { stageDefinition: true } } },
-    });
+    const p = await projectWithStages('NM-26-040');
     const delivery = p.stages.find((s) => s.stageDefinition.key === 'DELIVERY')!;
-    // Complete blocking tasks in dependency order through the API.
-    const tasks = await db.task.findMany({
-      where: { projectStageId: delivery.id },
-      orderBy: { createdAt: 'asc' },
-    });
+    // Complete blocking tasks in dependency order through the API (creation order on ties).
+    const tasks = (
+      await db.models.Task.find({ projectStageId: delivery.id })
+        .sort({ $natural: 1 })
+        .lean<Task[]>()
+    ).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
     for (const t of tasks.filter((x) => x.status !== 'DONE')) {
       const r = await admin
         .patch(`/api/v1/tasks/${t.id}`)
@@ -137,17 +167,16 @@ describe('workflow engine', () => {
       .send({ direction: 'FORWARD' });
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('DELIVERED');
-    expect(await db.stageTransition.count({ where: { projectId: p.id, toStageId: null } })).toBe(1);
     expect(
-      await db.activityLog.count({ where: { projectId: p.id, action: 'project.delivered' } }),
+      await db.models.StageTransition.countDocuments({ projectId: p.id, toStageId: null }),
+    ).toBe(1);
+    expect(
+      await db.models.ActivityLog.countDocuments({ projectId: p.id, action: 'project.delivered' }),
     ).toBeGreaterThan(0);
   });
 
   it('requires a reason to send work back', async () => {
-    const p = await db.project.findUniqueOrThrow({
-      where: { code: 'NM-26-032' },
-      include: { stages: { include: { stageDefinition: true } } },
-    });
+    const p = await projectWithStages('NM-26-032');
     const edit = p.stages.find((s) => s.stageDefinition.key === 'EDIT')!;
     const missing = await admin
       .post(`/api/v1/projects/${p.id}/transitions`)
@@ -166,9 +195,12 @@ describe('workflow engine', () => {
 
 describe('tasks and dependencies', () => {
   it('refuses to start a task whose prerequisites are open', async () => {
-    const grade = await db.task.findFirstOrThrow({
-      where: { title: 'Colour grade', project: { code: 'NM-26-031' } },
-    });
+    const woven = await project('NM-26-031');
+    const grade = await found(
+      db.models.Task.findOne({ title: 'Colour grade', projectId: woven.id })
+        .sort({ $natural: 1 })
+        .lean<Task>(),
+    );
     const res = await admin
       .patch(`/api/v1/tasks/${grade.id}`)
       .set('origin', ORIGIN)
@@ -218,8 +250,12 @@ describe('tasks and dependencies', () => {
 
 describe('scheduling', () => {
   it('rejects double-booking equipment unless the overlap is acknowledged', async () => {
-    const shoot = await db.shoot.findFirstOrThrow({ where: { title: 'Beach reels' } });
-    const drone = await db.asset.findUniqueOrThrow({ where: { serialTag: 'NM-DRO-INSPIRE3' } });
+    const shoot = await found(
+      db.models.Shoot.findOne({ title: 'Beach reels' }).sort({ $natural: 1 }).lean<Shoot>(),
+    );
+    const drone = await found(
+      db.models.Asset.findOne({ serialTag: 'NM-DRO-INSPIRE3' }).lean<Asset>(),
+    );
     const clash = await admin
       .post(`/api/v1/shoots/${shoot.id}/bookings`)
       .set('origin', ORIGIN)
@@ -235,8 +271,12 @@ describe('scheduling', () => {
   });
 
   it('refuses to book equipment in maintenance', async () => {
-    const shoot = await db.shoot.findFirstOrThrow({ where: { title: 'Location recce' } });
-    const komodo = await db.asset.findUniqueOrThrow({ where: { serialTag: 'NM-CAM-KOMODO' } });
+    const shoot = await found(
+      db.models.Shoot.findOne({ title: 'Location recce' }).sort({ $natural: 1 }).lean<Shoot>(),
+    );
+    const komodo = await found(
+      db.models.Asset.findOne({ serialTag: 'NM-CAM-KOMODO' }).lean<Asset>(),
+    );
     const res = await admin
       .post(`/api/v1/shoots/${shoot.id}/bookings`)
       .set('origin', ORIGIN)
@@ -248,18 +288,25 @@ describe('scheduling', () => {
 
 describe('client review loop', () => {
   it('records a client decision and closes the revision round', async () => {
-    const approval = await db.approval.findFirstOrThrow({
-      where: { status: 'PENDING', deliverable: { project: { code: 'NM-26-032' } } },
-    });
+    const zen = await project('NM-26-032');
+    const approval = await found(
+      db.models.Approval.findOne({
+        status: 'PENDING',
+        deliverableId: { $in: await db.models.Deliverable.distinct('_id', { projectId: zen.id }) },
+      })
+        .sort({ $natural: 1 })
+        .lean<Approval>(),
+    );
     const res = await admin
       .post(`/api/v1/approvals/${approval.id}/decision`)
       .set('origin', ORIGIN)
       .send({ status: 'APPROVED', note: 'Signed off on call' });
     expect(res.status).toBe(201);
-    const d = await db.deliverable.findUniqueOrThrow({
-      where: { id: approval.deliverableId! },
-      include: { rounds: true },
-    });
+    const d = await found(
+      db.models.Deliverable.findById(approval.deliverableId!)
+        .populate('rounds')
+        .lean<Deliverable & { rounds: RevisionRound[] }>(),
+    );
     expect(d.status).toBe('APPROVED');
     expect(d.rounds.every((r) => r.closedAt !== null)).toBe(true);
     const again = await admin

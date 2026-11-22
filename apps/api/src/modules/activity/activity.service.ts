@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import type { ActivitySource, EntityType } from '@nova/shared';
-import type { Prisma } from '@nova/db';
-import { PrismaService, type Db } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 
 export interface ActivityInput {
   actorId: string | null;
@@ -12,7 +11,7 @@ export interface ActivityInput {
   entityId: string;
   projectId?: string | null;
   summary: string;
-  metadata?: Prisma.InputJsonValue;
+  metadata?: unknown;
 }
 
 export interface ActivityEvent {
@@ -35,23 +34,31 @@ export const ACTIVITY_EVENT = 'activity.recorded';
 @Injectable()
 export class ActivityService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly events: EventEmitter2,
   ) {}
 
-  record(db: Db, input: ActivityInput) {
-    return db.activityLog.create({
-      data: {
-        actorId: input.actorId,
-        source: input.source ?? 'UI',
-        action: input.action,
-        entityType: input.entityType,
-        entityId: input.entityId,
-        projectId: input.projectId ?? null,
-        summary: input.summary,
-        metadata: input.metadata,
-      },
+  /** Inserts an activity row; joins the surrounding transaction when there is one. */
+  async record(input: ActivityInput): Promise<ActivityEvent> {
+    const doc = await this.database.models.ActivityLog.create({
+      actorId: input.actorId,
+      source: input.source ?? 'UI',
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      projectId: input.projectId ?? null,
+      summary: input.summary,
+      metadata: input.metadata ?? null,
     });
+    return {
+      id: doc.id,
+      action: doc.action,
+      entityType: doc.entityType,
+      entityId: doc.entityId,
+      projectId: doc.projectId,
+      summary: doc.summary,
+      createdAt: doc.createdAt,
+    };
   }
 
   /** Emits a committed activity row to real-time subscribers. */
@@ -64,23 +71,22 @@ export class ActivityService {
    * change and is published to live clients only after the commit succeeds.
    */
   async transaction<T>(
-    fn: (tx: Db, log: (input: ActivityInput) => Promise<void>) => Promise<T>,
+    fn: (log: (input: ActivityInput) => Promise<void>) => Promise<T>,
   ): Promise<T> {
-    const rows: ActivityEvent[] = [];
-    const result = await this.prisma.db.$transaction(
-      (tx) =>
-        fn(tx, async (input) => {
-          rows.push(await this.record(tx, input));
-        }),
-      { timeout: 15_000 },
-    );
+    let rows: ActivityEvent[] = [];
+    const result = await this.database.transaction(() => {
+      rows = []; // MongoDB may retry the whole transaction; keep only the committed attempt's rows.
+      return fn(async (input) => {
+        rows.push(await this.record(input));
+      });
+    });
     for (const row of rows) this.publish(row);
     return result;
   }
 
   /** Records outside a transaction and publishes immediately. */
   async log(input: ActivityInput) {
-    const row = await this.record(this.prisma.db, input);
+    const row = await this.record(input);
     this.publish(row);
     return row;
   }

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  canSeeProjectMoney,
   PROJECT_TYPE_LABELS,
   type ClientDetail,
   type ClientView,
@@ -10,21 +11,47 @@ import {
   type SessionUser,
   type UpdateLead,
 } from '@nova/shared';
-import type { Prisma } from '@nova/db';
+import type {
+  Approval,
+  Client,
+  ClientInteraction,
+  Deliverable,
+  Lead,
+  PopulateOptions,
+  Project,
+  ProjectStage,
+  User,
+} from '@nova/db';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { equalsI } from '../../common/query';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
-import { iso, isoOrNull, summaryInclude, toSummary } from '../projects/project.mapper';
+import {
+  iso,
+  isoOrNull,
+  summaryFor,
+  summaryPopulate,
+  toSummary,
+  type SummaryRow,
+  type Viewer,
+} from '../projects/project.mapper';
 
-const leadInclude = {
-  client: { select: { id: true, name: true, accentColor: true } },
-  convertedProject: { select: { id: true, code: true, title: true } },
-} satisfies Prisma.LeadInclude;
+const leadPopulate: PopulateOptions[] = [
+  { path: 'client', select: { name: 1, accentColor: 1 } },
+  { path: 'convertedProject', select: { code: 1, title: 1 } },
+];
 
-const toLead = (l: Prisma.LeadGetPayload<{ include: typeof leadInclude }>): LeadView => ({
+type LeadRow = Lead & {
+  client: Pick<Client, 'id' | 'name' | 'accentColor'> | null;
+  convertedProject: Pick<Project, 'id' | 'code' | 'title'> | null;
+};
+
+const toLead = (l: LeadRow): LeadView => ({
   id: l.id,
   title: l.title,
-  client: l.client,
+  client: l.client
+    ? { id: l.client.id, name: l.client.name, accentColor: l.client.accentColor }
+    : null,
   prospectName: l.prospectName,
   projectType: l.projectType,
   estimatedValue: l.estimatedValue,
@@ -32,42 +59,71 @@ const toLead = (l: Prisma.LeadGetPayload<{ include: typeof leadInclude }>): Lead
   source: l.source,
   expectedCloseDate: isoOrNull(l.expectedCloseDate),
   notes: l.notes,
-  convertedProject: l.convertedProject,
+  convertedProject: l.convertedProject
+    ? { id: l.convertedProject.id, code: l.convertedProject.code, title: l.convertedProject.title }
+    : null,
   updatedAt: iso(l.updatedAt),
 });
 
-const clientInclude = {
-  projects: { select: { status: true, budget: true } },
-  interactions: { select: { occurredAt: true }, orderBy: { occurredAt: 'desc' }, take: 1 },
-} satisfies Prisma.ClientInclude;
+// List virtuals: the selects keep the foreign field (`clientId`) so populate can match rows.
+const clientPopulate: PopulateOptions[] = [
+  { path: 'projects', select: { status: 1, budget: 1, clientId: 1 } },
+  {
+    path: 'interactions',
+    select: { occurredAt: 1, clientId: 1 },
+    options: { sort: { occurredAt: -1 } },
+    perDocumentLimit: 1,
+  },
+];
+
+type ClientRow = Client & {
+  projects: Pick<Project, 'status' | 'budget'>[];
+  interactions: Pick<ClientInteraction, 'occurredAt'>[];
+};
+
+type PendingApprovalRow = Approval & {
+  deliverable: (Deliverable & { project: Pick<Project, 'clientId'> | null }) | null;
+  projectStage: (ProjectStage & { project: Pick<Project, 'clientId'> | null }) | null;
+};
+
+type InteractionRow = ClientInteraction & {
+  project: Pick<Project, 'id' | 'code' | 'title'> | null;
+  loggedBy: Pick<User, 'name'> | null;
+};
 
 @Injectable()
 export class ClientsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
   private async pendingApprovalsByClient(): Promise<Map<string, number>> {
-    const pending = await this.prisma.db.approval.findMany({
-      where: { status: 'PENDING', kind: 'CLIENT' },
-      select: {
-        deliverable: { select: { project: { select: { clientId: true } } } },
-        projectStage: { select: { project: { select: { clientId: true } } } },
-      },
-    });
+    const pending = await this.database.models.Approval.find({ status: 'PENDING', kind: 'CLIENT' })
+      .select({ deliverableId: 1, projectStageId: 1 })
+      .populate([
+        {
+          path: 'deliverable',
+          select: { projectId: 1 },
+          populate: { path: 'project', select: { clientId: 1 } },
+        },
+        {
+          path: 'projectStage',
+          select: { projectId: 1 },
+          populate: { path: 'project', select: { clientId: 1 } },
+        },
+      ])
+      .lean<PendingApprovalRow[]>();
     const map = new Map<string, number>();
     for (const a of pending) {
-      const clientId = a.deliverable?.project.clientId ?? a.projectStage?.project.clientId;
+      const clientId = a.deliverable?.project?.clientId ?? a.projectStage?.project?.clientId;
       if (clientId) map.set(clientId, (map.get(clientId) ?? 0) + 1);
     }
     return map;
   }
 
-  private toView(
-    c: Prisma.ClientGetPayload<{ include: typeof clientInclude }>,
-    pending: Map<string, number>,
-  ): ClientView {
+  /** `viewer` decides whether the lifetime value is included (`canSeeProjectMoney`). */
+  private toView(c: ClientRow, pending: Map<string, number>, viewer: Viewer): ClientView {
     return {
       id: c.id,
       name: c.name,
@@ -80,60 +136,67 @@ export class ClientsService {
       contactPhone: c.contactPhone,
       activeProjects: c.projects.filter((p) => p.status === 'ACTIVE' || p.status === 'ON_HOLD')
         .length,
-      lifetimeValue: c.projects
-        .filter((p) => p.status !== 'CANCELLED')
-        .reduce((n, p) => n + p.budget, 0),
+      lifetimeValue: canSeeProjectMoney(viewer.permissions)
+        ? c.projects.filter((p) => p.status !== 'CANCELLED').reduce((n, p) => n + p.budget, 0)
+        : null,
       pendingApprovals: pending.get(c.id) ?? 0,
       lastInteractionAt: isoOrNull(c.interactions[0]?.occurredAt),
     };
   }
 
-  async list(): Promise<ClientView[]> {
+  async list(viewer: Viewer): Promise<ClientView[]> {
     const [clients, pending] = await Promise.all([
-      this.prisma.db.client.findMany({ include: clientInclude, orderBy: { name: 'asc' } }),
+      this.database.models.Client.find()
+        .sort({ name: 1 })
+        .populate(clientPopulate)
+        .lean<ClientRow[]>(),
       this.pendingApprovalsByClient(),
     ]);
-    return clients.map((c) => this.toView(c, pending));
+    return clients.map((c) => this.toView(c, pending, viewer));
   }
 
-  async get(id: string): Promise<ClientDetail> {
+  async get(id: string, viewer: Viewer): Promise<ClientDetail> {
+    const {
+      Client: Clients,
+      Project: Projects,
+      ClientInteraction: Interactions,
+    } = this.database.models;
     const [client, pending] = await Promise.all([
-      this.prisma.db.client.findUnique({
-        where: { id },
-        include: {
-          ...clientInclude,
-          leads: { include: leadInclude, orderBy: { updatedAt: 'desc' } },
-        },
-      }),
+      Clients.findById(id)
+        .populate([
+          ...clientPopulate,
+          { path: 'leads', options: { sort: { updatedAt: -1 } }, populate: leadPopulate },
+        ])
+        .lean<ClientRow & { leads: LeadRow[] }>(),
       this.pendingApprovalsByClient(),
     ]);
     if (!client) throw notFound('Client');
     const [projects, interactions] = await Promise.all([
-      this.prisma.db.project.findMany({
-        where: { clientId: id },
-        include: summaryInclude,
-        orderBy: { dueDate: 'desc' },
-      }),
-      this.prisma.db.clientInteraction.findMany({
-        where: { clientId: id },
-        include: {
-          project: { select: { id: true, code: true, title: true } },
-          loggedBy: { select: { name: true } },
-        },
-        orderBy: { occurredAt: 'desc' },
-      }),
+      Projects.find({ clientId: id })
+        .sort({ dueDate: -1 })
+        .populate(summaryPopulate)
+        .lean<SummaryRow[]>(),
+      Interactions.find({ clientId: id })
+        .sort({ occurredAt: -1 })
+        .populate([
+          { path: 'project', select: { code: 1, title: 1 } },
+          { path: 'loggedBy', select: { name: 1 } },
+        ])
+        .lean<InteractionRow[]>(),
     ]);
     const now = new Date();
     return {
-      ...this.toView(client, pending),
+      ...this.toView(client, pending, viewer),
       notes: client.notes,
-      projects: projects.map((p) => toSummary(p, now)),
+      projects: projects.map((p) => summaryFor(toSummary(p, now), viewer)),
       interactions: interactions.map((i) => ({
         id: i.id,
         type: i.type,
         summary: i.summary,
         occurredAt: iso(i.occurredAt),
-        project: i.project,
+        project: i.project
+          ? { id: i.project.id, code: i.project.code, title: i.project.title }
+          : null,
         loggedBy: i.loggedBy?.name ?? null,
       })),
       leads: client.leads.map(toLead),
@@ -141,16 +204,16 @@ export class ClientsService {
   }
 
   async create(input: CreateClient, user: SessionUser): Promise<ClientDetail> {
-    const duplicate = await this.prisma.db.client.findFirst({
-      where: { name: { equals: input.name, mode: 'insensitive' } },
-      select: { name: true },
-    });
+    const { Client: Clients } = this.database.models;
+    const duplicate = await Clients.findOne({ name: equalsI(input.name) })
+      .select({ name: 1 })
+      .lean<Pick<Client, 'name'>>();
     if (duplicate) {
       throw conflict('CLIENT_EXISTS', `A client named ${duplicate.name} already exists.`);
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const client = await tx.client.create({ data: { ...input, status: 'LEAD' } });
-      const log = await this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const client = (await Clients.create({ ...input, status: 'LEAD' })).toObject() as Client;
+      const log = await this.activity.record({
         actorId: user.id,
         action: 'client.created',
         entityType: 'client',
@@ -160,7 +223,7 @@ export class ClientsService {
       return { client, log };
     });
     this.activity.publish(row.log);
-    return this.get(row.client.id);
+    return this.get(row.client.id, user);
   }
 
   async logInteraction(
@@ -169,27 +232,30 @@ export class ClientsService {
     user: SessionUser,
     source: 'UI' | 'ASSISTANT' = 'UI',
   ) {
-    const client = await this.prisma.db.client.findUnique({ where: { id: clientId } });
+    const {
+      Client: Clients,
+      Project: Projects,
+      ClientInteraction: Interactions,
+    } = this.database.models;
+    const client = await Clients.findById(clientId).lean<Client>();
     if (!client) throw notFound('Client');
     if (input.projectId) {
-      const project = await this.prisma.db.project.findFirst({
-        where: { id: input.projectId, clientId },
-      });
+      const project = await Projects.findOne({ _id: input.projectId, clientId })
+        .select({ _id: 1 })
+        .lean();
       if (!project)
         throw unprocessable('INVALID_PROJECT', 'That project does not belong to this client.');
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const interaction = await tx.clientInteraction.create({
-        data: {
-          clientId,
-          projectId: input.projectId,
-          type: input.type,
-          summary: input.summary,
-          occurredAt: input.occurredAt ?? new Date(),
-          loggedById: user.id,
-        },
+    const row = await this.database.transaction(async () => {
+      const interaction = await Interactions.create({
+        clientId,
+        projectId: input.projectId ?? null,
+        type: input.type,
+        summary: input.summary,
+        occurredAt: input.occurredAt ?? new Date(),
+        loggedById: user.id,
       });
-      const log = await this.activity.record(tx, {
+      const log = await this.activity.record({
         actorId: user.id,
         source,
         action: 'client.interaction',
@@ -198,26 +264,29 @@ export class ClientsService {
         projectId: input.projectId ?? null,
         summary: `${user.name} logged a ${input.type.toLowerCase()} with ${client.name}: ${input.summary}`,
       });
-      return { interaction, log };
+      return { interactionId: interaction.id, log };
     });
     this.activity.publish(row.log);
-    return { id: row.interaction.id };
+    return { id: row.interactionId };
   }
 
   // ── Sales pipeline ─────────────────────────────────────────────────────────
 
   async leads(): Promise<LeadView[]> {
-    const leads = await this.prisma.db.lead.findMany({
-      include: leadInclude,
-      orderBy: { updatedAt: 'desc' },
-    });
+    const leads = await this.database.models.Lead.find()
+      .sort({ updatedAt: -1 })
+      .populate(leadPopulate)
+      .lean<LeadRow[]>();
     return leads.map(toLead);
   }
 
   async createLead(input: CreateLead, user: SessionUser): Promise<LeadView> {
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const lead = await tx.lead.create({ data: input, include: leadInclude });
-      const log = await this.activity.record(tx, {
+    const { Lead: Leads } = this.database.models;
+    const row = await this.database.transaction(async () => {
+      const created = await Leads.create(input);
+      const lead = await Leads.findById(created.id).populate(leadPopulate).lean<LeadRow>();
+      if (!lead) throw notFound('Lead');
+      const log = await this.activity.record({
         actorId: user.id,
         action: 'lead.created',
         entityType: 'lead',
@@ -231,7 +300,8 @@ export class ClientsService {
   }
 
   async updateLead(id: string, input: UpdateLead, user: SessionUser): Promise<LeadView> {
-    const before = await this.prisma.db.lead.findUnique({ where: { id } });
+    const { Lead: Leads } = this.database.models;
+    const before = await Leads.findById(id).lean<Lead>();
     if (!before) throw notFound('Lead');
     // A converted lead is a won deal with a production behind it; its stage is history.
     if (before.convertedProjectId && input.stage && input.stage !== before.stage) {
@@ -240,9 +310,12 @@ export class ClientsService {
         'This lead has been converted to a production; its stage can no longer change.',
       );
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const lead = await tx.lead.update({ where: { id }, data: input, include: leadInclude });
-      const log = await this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const lead = await Leads.findByIdAndUpdate(id, { $set: input }, { new: true })
+        .populate(leadPopulate)
+        .lean<LeadRow>();
+      if (!lead) throw notFound('Lead');
+      const log = await this.activity.record({
         actorId: user.id,
         action: 'lead.updated',
         entityType: 'lead',

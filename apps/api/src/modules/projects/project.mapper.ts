@@ -1,9 +1,33 @@
 /**
- * Read model for projects: Prisma include shapes plus pure mapping into the shared view types.
- * Health, progress and the delivery projection are computed here from the shared domain rules.
+ * Read model for projects: Mongoose populate shapes (with the lean row types they produce) plus
+ * pure mapping into the shared view types. Health, progress and the delivery projection are
+ * computed here from the shared domain rules.
  */
-import type { Prisma } from '@nova/db';
+import type {
+  Approval,
+  Asset,
+  AssetBooking,
+  Client,
+  CrewCall,
+  Deliverable,
+  FeedbackItem,
+  FinancialRecord,
+  PopulateOptions,
+  Project,
+  ProjectMember,
+  ProjectStage,
+  RevisionRound,
+  Shoot,
+  StageDefinition,
+  StageTransition,
+  Task,
+  TaskDependency,
+  TeamMember,
+  User,
+  WorkflowTemplate,
+} from '@nova/db';
 import {
+  canSeeProjectMoney,
   computeHealth,
   computeProgress,
   currentStage,
@@ -11,6 +35,7 @@ import {
   DAY_MS,
   evaluateForwardTransition,
   type MemberRef,
+  type Permission,
   type ProjectDetail,
   type ProjectStageView,
   type ProjectSummary,
@@ -19,6 +44,55 @@ import {
   type TaskSnapshot,
   type TaskView,
 } from '@nova/shared';
+
+/** The caller a read model is being prepared for. Only the permissions matter here. */
+export interface Viewer {
+  permissions: readonly Permission[];
+}
+
+/** A summary as computed, before visibility rules: the money is always present. */
+export type FullProjectSummary = Omit<ProjectSummary, 'budget' | 'spent'> & {
+  budget: number;
+  spent: number;
+};
+
+/** A detail view as computed, before visibility rules. */
+export type FullProjectDetail = Omit<ProjectDetail, 'budget' | 'spent' | 'finance'> & {
+  budget: number;
+  spent: number;
+  finance: NonNullable<ProjectDetail['finance']>;
+};
+
+/**
+ * What the budget-burn risk signal says to a caller who may not see the figures: the signal and
+ * its weight stay (the health score would be unexplained without it), the percentages go.
+ */
+const BUDGET_BURN_WITHOUT_FIGURES = 'Spending is running ahead of progress';
+
+const withoutBurnFigures = (health: FullProjectSummary['health']) => ({
+  ...health,
+  deductions: health.deductions.map((d) =>
+    d.code === 'BUDGET_BURN' ? { ...d, label: BUDGET_BURN_WITHOUT_FIGURES } : d,
+  ),
+});
+
+/** The summary this viewer may receive (see `canSeeProjectMoney` in the shared contracts). */
+export function summaryFor(p: FullProjectSummary, viewer: Viewer): ProjectSummary {
+  if (canSeeProjectMoney(viewer.permissions)) return p;
+  return { ...p, budget: null, spent: null, health: withoutBurnFigures(p.health) };
+}
+
+/** The detail view this viewer may receive: without budget, spend and the finance breakdown. */
+export function detailFor(p: FullProjectDetail, viewer: Viewer): ProjectDetail {
+  if (canSeeProjectMoney(viewer.permissions)) return p;
+  return {
+    ...p,
+    budget: null,
+    spent: null,
+    finance: null,
+    health: withoutBurnFigures(p.health),
+  };
+}
 
 export const iso = (d: Date) => d.toISOString();
 export const isoOrNull = (d: Date | null | undefined) => (d ? d.toISOString() : null);
@@ -35,64 +109,143 @@ export const memberRef = (m: {
   avatarUrl: m.avatarUrl,
 });
 
-export const summaryInclude = {
-  client: true,
-  stages: { include: { stageDefinition: true, approvals: true } },
-  tasks: {
-    select: { id: true, title: true, status: true, projectStageId: true, isStageBlocking: true },
+/** A task with what `toTaskView` needs: its assignee and the ids of the tasks it waits for. */
+export type TaskViewRow = Task & {
+  assignee: TeamMember | null;
+  dependsOn: Pick<TaskDependency, '_id' | 'id' | 'taskId' | 'dependsOnId'>[];
+};
+
+/** Populate for a task read through `toTaskView` (list virtuals keep their foreign field). */
+export const taskViewPopulate: PopulateOptions[] = [
+  { path: 'assignee' },
+  { path: 'dependsOn', select: { taskId: 1, dependsOnId: 1 } },
+];
+
+export const summaryPopulate: PopulateOptions[] = [
+  { path: 'client' },
+  { path: 'stages', populate: [{ path: 'stageDefinition' }, { path: 'approvals' }] },
+  {
+    path: 'tasks',
+    select: { title: 1, status: 1, projectStageId: 1, isStageBlocking: 1, projectId: 1 },
   },
-  members: { include: { teamMember: true } },
-  finances: { select: { kind: true, amount: true, category: true } },
-  deliverables: { select: { rounds: { select: { includedInScope: true } }, approvals: true } },
-  shoots: {
-    where: { status: { not: 'CANCELLED' } },
-    orderBy: { startsAt: 'asc' },
-    select: { id: true, title: true, startsAt: true },
+  { path: 'members', populate: { path: 'teamMember' } },
+  { path: 'finances', select: { kind: 1, amount: 1, category: 1, projectId: 1 } },
+  {
+    path: 'deliverables',
+    select: { projectId: 1 },
+    populate: [
+      { path: 'rounds', select: { includedInScope: 1, deliverableId: 1 } },
+      { path: 'approvals' },
+    ],
   },
-} satisfies Prisma.ProjectInclude;
-
-export type ProjectWithSummary = Prisma.ProjectGetPayload<{ include: typeof summaryInclude }>;
-
-export const shootInclude = {
-  project: { select: { id: true, code: true, title: true, coverImageUrl: true } },
-  crew: { include: { teamMember: true } },
-  bookings: { include: { asset: true } },
-} satisfies Prisma.ShootInclude;
-
-export type ShootWithRelations = Prisma.ShootGetPayload<{ include: typeof shootInclude }>;
-
-export const detailInclude = {
-  ...summaryInclude,
-  workflowTemplate: { select: { id: true, name: true } },
-  stages: { include: { stageDefinition: true, approvals: true, owner: true } },
-  tasks: {
-    include: { assignee: true, dependsOn: { select: { dependsOnId: true } } },
-    orderBy: [{ createdAt: 'asc' }],
+  {
+    path: 'shoots',
+    match: { status: { $ne: 'CANCELLED' } },
+    options: { sort: { startsAt: 1 } },
+    select: { title: 1, startsAt: 1, projectId: 1 },
   },
-  deliverables: {
-    include: {
-      rounds: {
-        include: { feedback: { orderBy: { createdAt: 'asc' } } },
-        orderBy: { number: 'asc' },
+];
+
+export type SummaryRow = Project & {
+  client: Client;
+  stages: (ProjectStage & { stageDefinition: StageDefinition; approvals: Approval[] })[];
+  tasks: Pick<
+    Task,
+    '_id' | 'id' | 'title' | 'status' | 'projectStageId' | 'isStageBlocking' | 'projectId'
+  >[];
+  members: (ProjectMember & { teamMember: TeamMember })[];
+  finances: Pick<FinancialRecord, '_id' | 'id' | 'kind' | 'amount' | 'category' | 'projectId'>[];
+  deliverables: (Pick<Deliverable, '_id' | 'id' | 'projectId'> & {
+    rounds: Pick<RevisionRound, '_id' | 'id' | 'includedInScope' | 'deliverableId'>[];
+    approvals: Approval[];
+  })[];
+  shoots: Pick<Shoot, '_id' | 'id' | 'title' | 'startsAt' | 'projectId'>[];
+};
+
+/** Former name of `SummaryRow`. */
+export type ProjectWithSummary = SummaryRow;
+
+export const shootPopulate: PopulateOptions[] = [
+  { path: 'project', select: { code: 1, title: 1, coverImageUrl: 1 } },
+  { path: 'crew', populate: { path: 'teamMember' } },
+  { path: 'bookings', populate: { path: 'asset' } },
+];
+
+export type ShootRow = Shoot & {
+  project: Pick<Project, '_id' | 'id' | 'code' | 'title' | 'coverImageUrl'>;
+  crew: (CrewCall & { teamMember: TeamMember })[];
+  bookings: (AssetBooking & { asset: Asset })[];
+};
+
+/** Former name of `ShootRow`. */
+export type ShootWithRelations = ShootRow;
+
+const stageLabel: PopulateOptions = { path: 'stageDefinition', select: { label: 1 } };
+
+/**
+ * Everything the project page shows. As the former include did, it replaces the summary's
+ * stages, tasks, deliverables and shoots (so the detail's shoots include cancelled ones).
+ */
+export const detailPopulate: PopulateOptions[] = [
+  ...summaryPopulate.filter((p) => !['stages', 'tasks', 'deliverables', 'shoots'].includes(p.path)),
+  { path: 'workflowTemplate', select: { name: 1 } },
+  {
+    path: 'stages',
+    populate: [{ path: 'stageDefinition' }, { path: 'approvals' }, { path: 'owner' }],
+  },
+  { path: 'tasks', options: { sort: { createdAt: 1 } }, populate: taskViewPopulate },
+  {
+    path: 'deliverables',
+    options: { sort: { createdAt: 1 } },
+    populate: [
+      {
+        path: 'rounds',
+        options: { sort: { number: 1 } },
+        populate: { path: 'feedback', options: { sort: { createdAt: 1 } } },
       },
-      approvals: { orderBy: { requestedAt: 'desc' } },
-    },
-    orderBy: { createdAt: 'asc' },
+      { path: 'approvals', options: { sort: { requestedAt: -1 } } },
+    ],
   },
-  shoots: { include: shootInclude, orderBy: { startsAt: 'asc' } },
-  transitions: {
-    include: {
-      actor: { select: { name: true } },
-      fromStage: { include: { stageDefinition: { select: { label: true } } } },
-      toStage: { include: { stageDefinition: { select: { label: true } } } },
-    },
-    orderBy: { createdAt: 'desc' },
+  { path: 'shoots', options: { sort: { startsAt: 1 } }, populate: shootPopulate },
+  {
+    path: 'transitions',
+    options: { sort: { createdAt: -1 } },
+    populate: [
+      { path: 'actor', select: { name: 1 } },
+      { path: 'fromStage', populate: stageLabel },
+      { path: 'toStage', populate: stageLabel },
+    ],
   },
-} satisfies Prisma.ProjectInclude;
+];
 
-export type ProjectWithDetail = Prisma.ProjectGetPayload<{ include: typeof detailInclude }>;
+type TransitionStage = ProjectStage & {
+  stageDefinition: Pick<StageDefinition, '_id' | 'id' | 'label'>;
+};
 
-type StageRow = ProjectWithSummary['stages'][number];
+export type DetailRow = Omit<SummaryRow, 'stages' | 'tasks' | 'deliverables' | 'shoots'> & {
+  workflowTemplate: Pick<WorkflowTemplate, '_id' | 'id' | 'name'>;
+  stages: (ProjectStage & {
+    stageDefinition: StageDefinition;
+    approvals: Approval[];
+    owner: TeamMember | null;
+  })[];
+  tasks: TaskViewRow[];
+  deliverables: (Deliverable & {
+    rounds: (RevisionRound & { feedback: FeedbackItem[] })[];
+    approvals: Approval[];
+  })[];
+  shoots: ShootRow[];
+  transitions: (StageTransition & {
+    actor: Pick<User, '_id' | 'id' | 'name'> | null;
+    fromStage: TransitionStage | null;
+    toStage: TransitionStage | null;
+  })[];
+};
+
+/** Former name of `DetailRow`. */
+export type ProjectWithDetail = DetailRow;
+
+type StageRow = SummaryRow['stages'][number];
 
 export function stageSnapshots(stages: StageRow[]): StageSnapshot[] {
   return stages.map((s) => ({
@@ -138,7 +291,7 @@ export function stageApproved(s: {
   });
 }
 
-export function taskSnapshots(tasks: ProjectWithSummary['tasks']): TaskSnapshot[] {
+export function taskSnapshots(tasks: SummaryRow['tasks']): TaskSnapshot[] {
   return tasks.map((t) => ({
     id: t.id,
     title: t.title,
@@ -149,7 +302,7 @@ export function taskSnapshots(tasks: ProjectWithSummary['tasks']): TaskSnapshot[
 }
 
 /** Pending client approvals across stage-level and deliverable-level approvals (de-duplicated). */
-function pendingClientApprovals(p: ProjectWithSummary) {
+function pendingClientApprovals(p: SummaryRow) {
   const all = [
     ...p.stages.flatMap((s) => s.approvals),
     ...p.deliverables.flatMap((d) => d.approvals),
@@ -158,7 +311,7 @@ function pendingClientApprovals(p: ProjectWithSummary) {
   return [...unique.values()].filter((a) => a.status === 'PENDING' && a.kind === 'CLIENT');
 }
 
-export function toSummary(p: ProjectWithSummary, now: Date): ProjectSummary {
+export function toSummary(p: SummaryRow, now: Date): FullProjectSummary {
   const stages = stageSnapshots(p.stages);
   const tasks = taskSnapshots(p.tasks);
   const progress = p.status === 'DELIVERED' ? 1 : computeProgress(stages, tasks);
@@ -216,7 +369,7 @@ export function toSummary(p: ProjectWithSummary, now: Date): ProjectSummary {
   };
 }
 
-export function toTaskView(t: ProjectWithDetail['tasks'][number]): TaskView {
+export function toTaskView(t: TaskViewRow): TaskView {
   return {
     id: t.id,
     projectId: t.projectId,
@@ -237,14 +390,17 @@ export function toTaskView(t: ProjectWithDetail['tasks'][number]): TaskView {
   };
 }
 
-export function toShootView(
-  s: ShootWithRelations,
-  conflicts: ShootView['conflicts'] = [],
-): ShootView {
+export function toShootView(s: ShootRow, conflicts: ShootView['conflicts'] = []): ShootView {
   return {
     id: s.id,
     projectId: s.projectId,
-    project: s.project,
+    // Mapped field by field: the lean row also carries `_id`, which is not part of the view.
+    project: {
+      id: s.project.id,
+      code: s.project.code,
+      title: s.project.title,
+      coverImageUrl: s.project.coverImageUrl,
+    },
     title: s.title,
     location: s.location,
     city: s.city,
@@ -262,9 +418,7 @@ export function toShootView(
   };
 }
 
-export const approvalView = (
-  a: ProjectWithDetail['deliverables'][number]['approvals'][number],
-) => ({
+export const approvalView = (a: Approval) => ({
   id: a.id,
   kind: a.kind,
   status: a.status,
@@ -278,10 +432,10 @@ export const approvalView = (
 });
 
 export function toDetail(
-  p: ProjectWithDetail,
+  p: DetailRow,
   now: Date,
   shootConflicts: Map<string, ShootView['conflicts']> = new Map(),
-): ProjectDetail {
+): FullProjectDetail {
   const summary = toSummary(p, now);
   const snapshots = stageSnapshots(p.stages);
   const tasks = taskSnapshots(p.tasks);
@@ -332,7 +486,7 @@ export function toDetail(
 
   return {
     ...summary,
-    workflow: p.workflowTemplate,
+    workflow: { id: p.workflowTemplate.id, name: p.workflowTemplate.name },
     includedRevisions: p.includedRevisions,
     stages,
     tasks: p.tasks.map(toTaskView),
@@ -380,7 +534,7 @@ export function toDetail(
       income,
       expenses: summary.spent,
       byCategory: [...byCategory.entries()].map(([category, amount]) => ({
-        category: category as ProjectDetail['finance']['byCategory'][number]['category'],
+        category: category as FullProjectDetail['finance']['byCategory'][number]['category'],
         amount,
       })),
     },
@@ -400,7 +554,7 @@ export function toDetail(
  * labelled "NOVA estimate" in the UI.
  */
 function projectDelivery(
-  p: ProjectWithDetail,
+  p: DetailRow,
   stages: ProjectStageView[],
   tasks: TaskSnapshot[],
   now: Date,

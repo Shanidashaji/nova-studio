@@ -2,7 +2,7 @@
   "name": "@nova/db",
   "version": "0.1.0",
   "private": true,
-  "description": "Prisma schema, migrations, seed and typed client for NOVA",
+  "description": "Mongoose models, seed and database helpers for NOVA (MongoDB)",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -12,27 +12,24 @@
     }
   },
   "scripts": {
-    "generate": "prisma generate",
-    "build": "prisma generate && tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json",
     "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "migrate:dev": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy",
-    "seed": "prisma generate && tsx src/seed/index.ts",
-    "reset": "prisma migrate reset --force && prisma generate && tsx src/seed/index.ts"
+    "setup": "tsx src/setup.ts",
+    "seed": "tsx src/seed/index.ts",
+    "reset": "tsx src/seed/index.ts"
   },
   "dependencies": {
     "@nova/shared": "workspace:*",
-    "@prisma/adapter-pg": "7.10.1",
-    "@prisma/client": "7.10.1",
-    "dotenv": "17.4.2"
+    "dotenv": "17.4.2",
+    "mongodb": "7.8.0",
+    "mongoose": "9.12.1"
   },
   "devDependencies": {
     "@nova/config": "workspace:*",
     "@types/node": "26.6.6",
     "eslint": "10.15.0",
-    "prisma": "7.10.1",
     "tsx": "4.23.15",
     "typescript": "6.0.3"
   }

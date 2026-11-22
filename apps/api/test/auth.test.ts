@@ -1,26 +1,28 @@
 import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
-import type { PrismaClient } from '@nova/db';
+import type { ActivityLog, Database, Session, User } from '@nova/db';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ADMIN, ORIGIN, bootApp, setKnownPasswords, signIn, testDb } from './helpers';
+import { ADMIN, ORIGIN, bootApp, found, setKnownPasswords, signIn, testDb } from './helpers';
 
 let app: INestApplication;
-let db: PrismaClient;
+let db: Database;
 
 beforeAll(async () => {
   app = await bootApp();
-  db = testDb();
+  db = await testDb();
   await setKnownPasswords(db);
 });
 
 afterAll(async () => {
   await app?.close();
-  await db?.$disconnect();
+  await db?.close();
 });
 
 const http = () => request(app.getHttpServer() as Server);
+const adminUser = () =>
+  found(db.models.User.findOne({ email: ADMIN.email }).lean<User>(), 'Admin user');
 
 describe('authentication', () => {
   it('exposes a public health check', async () => {
@@ -74,11 +76,11 @@ describe('authentication', () => {
     expect(cookie).toMatch(/SameSite=Lax/i);
 
     const token = /nova_session=([^;]+)/.exec(cookie)![1]!;
-    const stored = await db.session.findUnique({
-      where: { tokenHash: createHash('sha256').update(token).digest('hex') },
-    });
+    const stored = await db.models.Session.findOne({
+      tokenHash: createHash('sha256').update(token).digest('hex'),
+    }).lean<Session>();
     expect(stored).not.toBeNull();
-    expect(await db.session.count({ where: { tokenHash: token } })).toBe(0);
+    expect(await db.models.Session.countDocuments({ tokenHash: token })).toBe(0);
   });
 
   it('accepts the session for /me and fully revokes it on logout', async () => {
@@ -104,7 +106,7 @@ describe('authentication', () => {
     expect(cleared).toMatch(/nova_session=;/);
     expect(cleared).toMatch(/Expires=Thu, 01 Jan 1970/);
     expect(cleared).toMatch(/HttpOnly/i);
-    expect(await db.session.count({ where: { tokenHash } })).toBe(0);
+    expect(await db.models.Session.countDocuments({ tokenHash })).toBe(0);
 
     // The old token is dead even if a client kept a copy.
     expect((await me()).status).toBe(401);
@@ -122,31 +124,31 @@ describe('authentication', () => {
 
   it('rejects expired sessions', async () => {
     const agent = await signIn(app, ADMIN);
-    const user = await db.user.findUniqueOrThrow({ where: { email: ADMIN.email } });
-    await db.session.updateMany({
-      where: { userId: user.id },
-      data: { expiresAt: new Date(Date.now() - 1000) },
-    });
+    const user = await adminUser();
+    await db.models.Session.updateMany(
+      { userId: user.id },
+      { $set: { expiresAt: new Date(Date.now() - 1000) } },
+    );
     expect((await agent.get('/api/v1/auth/me')).status).toBe(401);
   });
 
   it('rejects idle sessions', async () => {
     const agent = await signIn(app, ADMIN);
-    const user = await db.user.findUniqueOrThrow({ where: { email: ADMIN.email } });
-    await db.session.updateMany({
-      where: { userId: user.id },
-      data: { lastSeenAt: new Date(Date.now() - 9 * 60 * 60 * 1000) },
-    });
+    const user = await adminUser();
+    await db.models.Session.updateMany(
+      { userId: user.id },
+      { $set: { lastSeenAt: new Date(Date.now() - 9 * 60 * 60 * 1000) } },
+    );
     expect((await agent.get('/api/v1/auth/me')).status).toBe(401);
   });
 
   it('rejects deactivated users', async () => {
     const agent = await signIn(app, ADMIN);
-    await db.user.update({ where: { email: ADMIN.email }, data: { isActive: false } });
+    await db.models.User.updateOne({ email: ADMIN.email }, { $set: { isActive: false } });
     try {
       expect((await agent.get('/api/v1/auth/me')).status).toBe(401);
     } finally {
-      await db.user.update({ where: { email: ADMIN.email }, data: { isActive: true } });
+      await db.models.User.updateOne({ email: ADMIN.email }, { $set: { isActive: true } });
     }
   });
 
@@ -162,10 +164,11 @@ describe('authentication', () => {
   it('records sign-in and sign-out in the activity log', async () => {
     const agent = await signIn(app, ADMIN);
     await agent.post('/api/v1/auth/logout').set('origin', ORIGIN);
-    const user = await db.user.findUniqueOrThrow({ where: { email: ADMIN.email } });
-    const actions = await db.activityLog.findMany({
-      where: { actorId: user.id, action: { in: ['auth.login', 'auth.logout'] } },
-    });
+    const user = await adminUser();
+    const actions = await db.models.ActivityLog.find({
+      actorId: user.id,
+      action: { $in: ['auth.login', 'auth.logout'] },
+    }).lean<ActivityLog[]>();
     expect(actions.map((a) => a.action)).toEqual(
       expect.arrayContaining(['auth.login', 'auth.logout']),
     );

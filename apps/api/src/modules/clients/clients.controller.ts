@@ -16,14 +16,14 @@ export class ClientsController {
 
   @Get('clients')
   @RequirePermissions('workspace:read')
-  list() {
-    return this.clients.list();
+  list(@CurrentUser() user: SessionUser) {
+    return this.clients.list(user);
   }
 
   @Get('clients/:id')
   @RequirePermissions('workspace:read')
-  get(@Param('id') id: string) {
-    return this.clients.get(id);
+  get(@Param('id') id: string, @CurrentUser() user: SessionUser) {
+    return this.clients.get(id, user);
   }
 
   @Post('clients')

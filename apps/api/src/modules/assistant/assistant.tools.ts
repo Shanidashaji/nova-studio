@@ -14,7 +14,20 @@ import {
   type ProjectSummary,
   type TaskStatus,
 } from '@nova/shared';
-import { PrismaService } from '../../database/prisma.service';
+import {
+  TaskStatus as TaskStatusOrder,
+  type ActivityLog,
+  type Approval,
+  type Client,
+  type Deliverable,
+  type Project,
+  type ProjectStage,
+  type StageDefinition,
+  type Task,
+  type TeamMember,
+} from '@nova/db';
+import { notFound } from '../../common/errors';
+import { DatabaseService } from '../../database/database.service';
 import { hiddenEntityTypes } from '../activity/activity-visibility';
 import { InsightsService } from '../insights/insights.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -30,6 +43,11 @@ const fmt = (d: Date | string) =>
     timeZone: 'Asia/Kolkata',
   });
 const pct = (n: number) => `${Math.round(n * 100)}%`;
+/** Declaration order of the task status enum (Postgres sorted enums by it, not alphabetically). */
+const STATUS_RANK = new Map<string, number>(
+  Object.values(TaskStatusOrder).map((status, i) => [status, i]),
+);
+type ProjectWithClient = Project & { client: Client };
 const projectRef = (p: { id: string; title: string }): AssistantReference => ({
   type: 'project',
   id: p.id,
@@ -43,7 +61,7 @@ const projectRef = (p: { id: string; title: string }): AssistantReference => ({
 @Injectable()
 export class AssistantTools {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly insights: InsightsService,
     private readonly projects: ProjectsService,
     private readonly team: TeamService,
@@ -52,8 +70,8 @@ export class AssistantTools {
 
   // ── Read tools ─────────────────────────────────────────────────────────────
 
-  async attention(limit = 6): Promise<ToolResult> {
-    const pulse = await this.insights.pulse();
+  async attention(ctx: AssistantContext, limit = 6): Promise<ToolResult> {
+    const pulse = await this.insights.pulse(ctx.user);
     const items = pulse.attention.slice(0, limit);
     if (items.length === 0) return { text: 'Nothing needs a decision right now.', references: [] };
     return {
@@ -63,8 +81,8 @@ export class AssistantTools {
     };
   }
 
-  async operations(): Promise<ToolResult> {
-    const pulse = await this.insights.pulse();
+  async operations(ctx: AssistantContext): Promise<ToolResult> {
+    const pulse = await this.insights.pulse(ctx.user);
     const t = pulse.totals;
     const constraint = pulse.spine.find((s) => s.isConstraint);
     const busiest = [...pulse.spine].sort((a, b) => b.wip - a.wip)[0];
@@ -90,10 +108,11 @@ export class AssistantTools {
 
   async projectsBy(
     kind: 'delayed' | 'at_risk' | 'due_soon' | 'active',
+    ctx: AssistantContext,
     days = 7,
   ): Promise<ToolResult> {
     const now = new Date();
-    const list = await this.projects.list({ status: 'ACTIVE', sort: 'due' });
+    const list = await this.projects.list({ status: 'ACTIVE', sort: 'due' }, ctx.user);
     const pick: Record<typeof kind, (p: ProjectSummary) => boolean> = {
       delayed: (p) =>
         daysOverdue(p.dueDate, now) > 0 ||
@@ -132,7 +151,7 @@ export class AssistantTools {
   async project(ref: string, ctx: AssistantContext): Promise<ToolResult> {
     const id = await this.resolveProjectId(ref, ctx);
     if (!id) return { text: `I couldn't find a production matching “${ref}”.`, references: [] };
-    const p = await this.projects.get(id);
+    const p = await this.projects.get(id, ctx.user);
     const now = new Date();
     const blockers = p.advance.ok ? [] : p.advance.blockers.map((b) => b.message);
     const pending = p.approvals.filter((a) => a.status === 'PENDING');
@@ -154,7 +173,10 @@ export class AssistantTools {
       nextShoot
         ? `Next shoot: ${nextShoot.title}, ${fmt(nextShoot.startsAt)} at ${nextShoot.location}.`
         : '',
-      `Budget: ₹${(p.spent / 1e5).toFixed(1)}L of ₹${(p.budget / 1e5).toFixed(1)}L spent (demo data).`,
+      // Null for a user who may not see what a production costs: the line is left out.
+      p.budget !== null && p.spent !== null
+        ? `Budget: ₹${(p.spent / 1e5).toFixed(1)}L of ₹${(p.budget / 1e5).toFixed(1)}L spent (demo data).`
+        : '',
     ].filter(Boolean);
     return {
       text: lines.join('\n'),
@@ -163,16 +185,25 @@ export class AssistantTools {
     };
   }
 
-  async blocked(): Promise<ToolResult> {
+  async blocked(ctx: AssistantContext): Promise<ToolResult> {
+    const { Task: Tasks, Project: Projects } = this.database.models;
     const [tasks, list] = await Promise.all([
-      this.prisma.db.task.findMany({
-        where: { status: 'BLOCKED', project: { status: 'ACTIVE' } },
-        include: {
-          project: { select: { id: true, title: true } },
-          assignee: { select: { name: true } },
-        },
-      }),
-      this.projects.list({ status: 'ACTIVE', sort: 'health' }),
+      (async () =>
+        Tasks.find({
+          status: 'BLOCKED',
+          projectId: { $in: await Projects.distinct('_id', { status: 'ACTIVE' }) },
+        })
+          .populate([
+            { path: 'project', select: { title: 1 } },
+            { path: 'assignee', select: { name: 1 } },
+          ])
+          .lean<
+            (Task & {
+              project: Pick<Project, 'id' | 'title'>;
+              assignee: Pick<TeamMember, 'id' | 'name'> | null;
+            })[]
+          >())(),
+      this.projects.list({ status: 'ACTIVE', sort: 'health' }, ctx.user),
     ]);
     const waiting = list.filter((p) => p.pendingApprovals > 0);
     if (tasks.length === 0 && waiting.length === 0)
@@ -217,14 +248,19 @@ export class AssistantTools {
   }
 
   async approvals(): Promise<ToolResult> {
-    const rows = await this.prisma.db.approval.findMany({
-      where: { status: 'PENDING' },
-      include: {
-        deliverable: { include: { project: { include: { client: true } } } },
-        projectStage: { include: { project: { include: { client: true } } } },
-      },
-      orderBy: { requestedAt: 'asc' },
-    });
+    const withProject = { path: 'project', populate: { path: 'client' } };
+    const rows = await this.database.models.Approval.find({ status: 'PENDING' })
+      .sort({ requestedAt: 1 })
+      .populate([
+        { path: 'deliverable', populate: withProject },
+        { path: 'projectStage', populate: withProject },
+      ])
+      .lean<
+        (Approval & {
+          deliverable: (Deliverable & { project: ProjectWithClient }) | null;
+          projectStage: (ProjectStage & { project: ProjectWithClient }) | null;
+        })[]
+      >();
     if (rows.length === 0) return { text: 'No approvals are waiting.', references: [] };
     const now = new Date();
     const lines = rows.map((a) => {
@@ -262,14 +298,13 @@ export class AssistantTools {
       : 7;
     const since = new Date(Date.now() - days * DAY_MS);
     const hidden = hiddenEntityTypes(ctx.user.permissions);
-    const rows = await this.prisma.db.activityLog.findMany({
-      where: {
-        createdAt: { gte: since },
-        ...(hidden.length ? { entityType: { notIn: hidden } } : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 2000,
-    });
+    const rows = await this.database.models.ActivityLog.find({
+      createdAt: { $gte: since },
+      ...(hidden.length ? { entityType: { $nin: hidden } } : {}),
+    })
+      .sort({ createdAt: -1 })
+      .limit(2000)
+      .lean<ActivityLog[]>();
     if (rows.length === 0) return { text: `No activity in the last ${days} days.`, references: [] };
     const count = (prefix: string) => rows.filter((r) => r.action.startsWith(prefix)).length;
     const completed = rows.filter((r) => r.action === 'task.completed').length;
@@ -291,10 +326,9 @@ export class AssistantTools {
     ].filter(Boolean);
     const projectIds = [...new Set(moved.map((r) => r.projectId).filter((x): x is string => !!x))];
     const projects = projectIds.length
-      ? await this.prisma.db.project.findMany({
-          where: { id: { in: projectIds } },
-          select: { id: true, title: true },
-        })
+      ? await this.database.models.Project.find({ _id: { $in: projectIds } })
+          .select({ title: 1 })
+          .lean<Pick<Project, 'id' | 'title'>[]>()
       : [];
     return { text: lines.join('\n'), references: projects.map(projectRef) };
   }
@@ -317,15 +351,13 @@ export class AssistantTools {
         ok: false,
         reason: 'Which production is this task for? Name it, or open it in the inspector first.',
       };
-    const project = await this.prisma.db.project.findUnique({
-      where: { id: projectId },
-      include: {
-        stages: {
-          where: { status: { in: ['ACTIVE', 'BLOCKED'] } },
-          include: { stageDefinition: true },
-        },
-      },
-    });
+    const project = await this.database.models.Project.findById(projectId)
+      .populate({
+        path: 'stages',
+        match: { status: { $in: ['ACTIVE', 'BLOCKED'] } },
+        populate: { path: 'stageDefinition' },
+      })
+      .lean<Project & { stages: (ProjectStage & { stageDefinition: StageDefinition })[] }>();
     if (!project) return { ok: false, reason: 'That production no longer exists.' };
     const member = input.assignee ? await this.resolveMember(input.assignee) : null;
     if (input.assignee && !member)
@@ -421,17 +453,17 @@ export class AssistantTools {
   ): Promise<ProposeOutcome> {
     const projectId = await this.resolveProjectId(input.project ?? '', ctx);
     if (!projectId) return { ok: false, reason: 'Which production should move to its next stage?' };
-    const p = await this.projects.get(projectId);
+    const p = await this.projects.get(projectId, ctx.user);
     if (!p.advance.ok) {
       return {
         ok: false,
         reason: `${p.title} can't leave ${p.stage?.label ?? 'its stage'} yet: ${p.advance.blockers.map((b) => b.message).join(' ')}`,
       };
     }
-    const row = await this.prisma.db.project.findUniqueOrThrow({
-      where: { id: p.id },
-      select: { updatedAt: true },
-    });
+    const row = await this.database.models.Project.findById(p.id)
+      .select({ updatedAt: 1 })
+      .lean<Pick<Project, 'id' | 'updatedAt'>>();
+    if (!row) throw notFound('Project');
     const to = p.advance.to?.label ?? 'Delivered';
     return {
       ok: true,
@@ -455,7 +487,9 @@ export class AssistantTools {
       : 'CALL';
     let clientId: string | null = null;
     let projectId: string | null = null;
-    const clients = await this.prisma.db.client.findMany({ select: { id: true, name: true } });
+    const clients = await this.database.models.Client.find()
+      .select({ name: 1 })
+      .lean<Pick<Client, 'id' | 'name'>[]>();
     const match = input.client
       ? findBestMatch(
           input.client,
@@ -466,10 +500,9 @@ export class AssistantTools {
     if (!clientId) {
       const pid = await this.contextProjectId(ctx);
       if (pid) {
-        const p = await this.prisma.db.project.findUnique({
-          where: { id: pid },
-          select: { clientId: true, id: true },
-        });
+        const p = await this.database.models.Project.findById(pid)
+          .select({ clientId: 1 })
+          .lean<Pick<Project, 'id' | 'clientId'>>();
         clientId = p?.clientId ?? null;
         projectId = p?.id ?? null;
       } else if (ctx.focus?.type === 'client' || ctx.inspect?.type === 'client') {
@@ -501,19 +534,24 @@ export class AssistantTools {
     if (ctx.inspect?.type === 'project') return ctx.inspect.id;
     if (ctx.focus?.type === 'project') return ctx.focus.id;
     if (ctx.inspect?.type === 'task') {
-      const t = await this.prisma.db.task.findUnique({
-        where: { id: ctx.inspect.id },
-        select: { projectId: true },
-      });
+      const t = await this.database.models.Task.findById(ctx.inspect.id)
+        .select({ projectId: 1 })
+        .lean<Pick<Task, 'id' | 'projectId'>>();
       return t?.projectId ?? null;
     }
     return null;
   }
 
   async resolveProjectId(ref: string, ctx: AssistantContext): Promise<string | null> {
-    const projects = await this.prisma.db.project.findMany({
-      select: { id: true, title: true, code: true, client: { select: { name: true } } },
-    });
+    // `clientId` must be selected for the `client` virtual to populate.
+    const projects = await this.database.models.Project.find()
+      .select({ title: 1, code: 1, clientId: 1 })
+      .populate({ path: 'client', select: { name: 1 } })
+      .lean<
+        (Pick<Project, 'id' | 'title' | 'code' | 'clientId'> & {
+          client: Pick<Client, 'id' | 'name'>;
+        })[]
+      >();
     if (projects.some((p) => p.id === ref)) return ref;
     const hit = ref.trim()
       ? (findBestMatch(
@@ -534,7 +572,9 @@ export class AssistantTools {
   }
 
   async resolveMember(ref: string) {
-    const members = await this.prisma.db.teamMember.findMany({ where: { isActive: true } });
+    const members = await this.database.models.TeamMember.find({ isActive: true }).lean<
+      TeamMember[]
+    >();
     if (members.some((m) => m.id === ref)) return members.find((m) => m.id === ref)!;
     const aliases = (title: string) =>
       /photography/i.test(title)
@@ -553,17 +593,29 @@ export class AssistantTools {
   }
 
   async resolveTask(ref: string, projectId: string | null) {
-    const tasks = await this.prisma.db.task.findMany({
-      where: {
-        ...(projectId ? { projectId } : {}),
-        project: { status: { in: ['ACTIVE', 'ON_HOLD'] } },
-      },
-      include: {
-        project: { select: { id: true, title: true } },
-        assignee: { select: { name: true } },
-      },
-      orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+    const { Task: Tasks, Project: Projects } = this.database.models;
+    const live: string[] = await Projects.distinct('_id', {
+      status: { $in: ['ACTIVE', 'ON_HOLD'] },
     });
+    const tasks = (
+      await Tasks.find({
+        projectId: projectId ? { $in: live.filter((id) => id === projectId) } : { $in: live },
+      })
+        .sort({ updatedAt: -1 })
+        .populate([
+          { path: 'project', select: { title: 1 } },
+          { path: 'assignee', select: { name: 1 } },
+        ])
+        .lean<
+          (Task & {
+            project: Pick<Project, 'id' | 'title'>;
+            assignee: Pick<TeamMember, 'id' | 'name'> | null;
+          })[]
+        >()
+    )
+      // Status in enum declaration order (as Postgres ordered it), then most recently updated;
+      // the sort is stable, so the updatedAt order from the query survives within a status.
+      .sort((a, b) => (STATUS_RANK.get(a.status) ?? 0) - (STATUS_RANK.get(b.status) ?? 0));
     if (tasks.some((t) => t.id === ref)) return tasks.find((t) => t.id === ref)!;
     // Prefer open work when several tasks share a name (e.g. "Colour grade" on every project).
     const open = tasks.filter((t) => t.status !== 'DONE');
@@ -595,9 +647,9 @@ export class AssistantTools {
     text: string,
     ctx: AssistantContext,
   ): Promise<{ projectId: string | null; rest: string }> {
-    const projects = await this.prisma.db.project.findMany({
-      select: { id: true, title: true, code: true },
-    });
+    const projects = await this.database.models.Project.find()
+      .select({ title: 1, code: 1 })
+      .lean<Pick<Project, 'id' | 'title' | 'code'>[]>();
     const hit = findBestMatch(
       text,
       projects.map((p) => ({ ...p, names: [p.title, p.code] })),

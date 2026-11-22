@@ -1,5 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import type { FinanceCategory, Prisma } from '@nova/db';
+import {
+  RecordNotFoundError,
+  type Client,
+  type FinanceCategory,
+  type FinancialRecord,
+  type Invoice,
+  type InvoiceLine,
+  type Milestone,
+  type Payment,
+  type PopulateOptions,
+  type Project,
+  type User,
+} from '@nova/db';
 import {
   daysOverdue,
   invoiceStatusAfterPayments,
@@ -18,29 +30,45 @@ import {
 } from '@nova/shared';
 import { conflict, notFound, unprocessable } from '../../common/errors';
 import { allocateNumber } from '../../common/numbering';
-import { PrismaService, type Db } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { NotificationsService } from '../activity/notifications.service';
 import { iso, isoOrNull } from '../projects/project.mapper';
 
-const summaryInclude = {
-  client: { select: { id: true, name: true, accentColor: true } },
-  project: { select: { id: true, code: true, title: true } },
-  payments: { select: { amount: true } },
-} satisfies Prisma.InvoiceInclude;
+const summaryPayments: PopulateOptions = { path: 'payments', select: { invoiceId: 1, amount: 1 } };
 
-const detailInclude = {
-  ...summaryInclude,
-  milestone: { select: { id: true, title: true } },
-  createdBy: { select: { id: true, name: true } },
-  lines: { orderBy: { order: 'asc' } },
-  payments: {
-    orderBy: { receivedOn: 'asc' },
-    include: { recordedBy: { select: { id: true, name: true } } },
+const summaryPopulate: PopulateOptions[] = [
+  { path: 'client', select: { name: 1, accentColor: 1 } },
+  { path: 'project', select: { code: 1, title: 1 } },
+  summaryPayments,
+];
+
+const detailPopulate: PopulateOptions[] = [
+  ...summaryPopulate.filter((p) => p !== summaryPayments),
+  { path: 'milestone', select: { title: 1 } },
+  { path: 'createdBy', select: { name: 1 } },
+  { path: 'lines', options: { sort: { order: 1 } } },
+  {
+    path: 'payments',
+    options: { sort: { receivedOn: 1 } },
+    populate: { path: 'recordedBy', select: { name: 1 } },
   },
-} satisfies Prisma.InvoiceInclude;
+];
 
-type SummaryRow = Prisma.InvoiceGetPayload<{ include: typeof summaryInclude }>;
+type UserRef = Pick<User, '_id' | 'id' | 'name'>;
+
+type SummaryRow = Invoice & {
+  client: Pick<Client, '_id' | 'id' | 'name' | 'accentColor'>;
+  project: Pick<Project, '_id' | 'id' | 'code' | 'title'> | null;
+  payments: Pick<Payment, '_id' | 'id' | 'invoiceId' | 'amount'>[];
+};
+
+type DetailRow = Omit<SummaryRow, 'payments'> & {
+  milestone: Pick<Milestone, '_id' | 'id' | 'title'> | null;
+  createdBy: UserRef;
+  lines: InvoiceLine[];
+  payments: (Payment & { recordedBy: UserRef })[];
+};
 
 const rupees = (n: number) => `₹${n.toLocaleString('en-IN')}`;
 
@@ -53,14 +81,26 @@ function toSummary(i: SummaryRow, now: Date): InvoiceSummary {
     status: i.status,
     overdue,
     daysOverdue: overdue ? daysOverdue(i.dueDate, now) : 0,
-    client: i.client,
-    project: i.project,
+    client: { id: i.client.id, name: i.client.name, accentColor: i.client.accentColor },
+    project: i.project ? { id: i.project.id, code: i.project.code, title: i.project.title } : null,
     issueDate: iso(i.issueDate),
     dueDate: iso(i.dueDate),
     total: i.total,
     paid,
     balance: i.status === 'VOID' ? 0 : Math.max(0, i.total - paid),
   };
+}
+
+/** Sum of `amount` over the matching documents (the former `aggregate({ _sum })`). */
+async function sumAmount(
+  model: { aggregate<R>(pipeline: object[]): PromiseLike<R[]> },
+  match: Record<string, unknown>,
+): Promise<number> {
+  const [row] = await model.aggregate<{ total: number }>([
+    { $match: match },
+    { $group: { _id: null, total: { $sum: '$amount' } } },
+  ]);
+  return row?.total ?? 0;
 }
 
 /**
@@ -70,29 +110,30 @@ function toSummary(i: SummaryRow, now: Date): InvoiceSummary {
 @Injectable()
 export class InvoicesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
     private readonly notifications: NotificationsService,
   ) {}
 
   async list(q: InvoiceListQuery): Promise<InvoiceSummary[]> {
     const now = new Date();
-    const rows = await this.prisma.db.invoice.findMany({
-      where: {
-        ...(q.status ? { status: q.status } : {}),
-        ...(q.clientId ? { clientId: q.clientId } : {}),
-        ...(q.projectId ? { projectId: q.projectId } : {}),
-        ...(q.overdue ? { status: { in: ['SENT', 'PARTIALLY_PAID'] }, dueDate: { lt: now } } : {}),
-      },
-      include: summaryInclude,
-      orderBy: [{ issueDate: 'desc' }, { number: 'desc' }],
-      take: 300,
-    });
+    const rows = await this.database.models.Invoice.find({
+      ...(q.status ? { status: q.status } : {}),
+      ...(q.clientId ? { clientId: q.clientId } : {}),
+      ...(q.projectId ? { projectId: q.projectId } : {}),
+      ...(q.overdue ? { status: { $in: ['SENT', 'PARTIALLY_PAID'] }, dueDate: { $lt: now } } : {}),
+    })
+      .populate(summaryPopulate)
+      .sort({ issueDate: -1, number: -1 })
+      .limit(300)
+      .lean<SummaryRow[]>();
     return rows.map((r) => toSummary(r, now));
   }
 
   async get(id: string): Promise<InvoiceDetail> {
-    const i = await this.prisma.db.invoice.findUnique({ where: { id }, include: detailInclude });
+    const i = await this.database.models.Invoice.findById(id)
+      .populate(detailPopulate)
+      .lean<DetailRow>();
     if (!i) throw notFound('Invoice');
     return {
       ...toSummary(i, new Date()),
@@ -101,8 +142,8 @@ export class InvoicesService {
       tax: i.tax,
       notes: i.notes,
       sentAt: isoOrNull(i.sentAt),
-      milestone: i.milestone,
-      createdBy: i.createdBy,
+      milestone: i.milestone ? { id: i.milestone.id, title: i.milestone.title } : null,
+      createdBy: { id: i.createdBy.id, name: i.createdBy.name },
       lines: i.lines.map((l) => ({
         id: l.id,
         order: l.order,
@@ -117,25 +158,27 @@ export class InvoicesService {
         receivedOn: iso(p.receivedOn),
         method: p.method,
         reference: p.reference,
-        recordedBy: p.recordedBy,
+        recordedBy: { id: p.recordedBy.id, name: p.recordedBy.name },
       })),
     };
   }
 
-  private async validateLinks(
-    db: Db,
-    input: { clientId: string; projectId?: string; milestoneId?: string },
-  ) {
-    const client = await db.client.findUnique({ where: { id: input.clientId } });
+  private async validateLinks(input: {
+    clientId: string;
+    projectId?: string;
+    milestoneId?: string;
+  }) {
+    const { Client: Clients, Project: Projects, Milestone: Milestones } = this.database.models;
+    const client = await Clients.findById(input.clientId).lean<Client>();
     if (!client) throw unprocessable('INVALID_CLIENT', 'Choose an existing client.');
     if (input.projectId) {
-      const p = await db.project.findUnique({ where: { id: input.projectId } });
+      const p = await Projects.findById(input.projectId, { clientId: 1 }).lean();
       if (!p || p.clientId !== input.clientId) {
         throw unprocessable('INVALID_PROJECT', 'That project does not belong to this client.');
       }
     }
     if (input.milestoneId) {
-      const m = await db.milestone.findUnique({ where: { id: input.milestoneId } });
+      const m = await Milestones.findById(input.milestoneId, { projectId: 1 }).lean();
       if (!m || m.projectId !== input.projectId) {
         throw unprocessable('INVALID_MILESTONE', 'That milestone does not belong to the project.');
       }
@@ -148,12 +191,13 @@ export class InvoicesService {
   }
 
   async create(input: CreateInvoice, user: SessionUser): Promise<InvoiceDetail> {
-    const client = await this.validateLinks(this.prisma.db, input);
+    const client = await this.validateLinks(input);
     const totals = invoiceTotals(input.lines, input.taxPercent);
-    const id = await this.activity.transaction(async (tx, log) => {
-      const number = await allocateNumber(tx, 'invoice');
-      const inv = await tx.invoice.create({
-        data: {
+    const id = await this.activity.transaction(async (log) => {
+      const { Invoice: Invoices, InvoiceLine: Lines } = this.database.models;
+      const number = await allocateNumber(this.database, 'invoice');
+      const inv = (
+        await Invoices.create({
           number,
           clientId: input.clientId,
           projectId: input.projectId ?? null,
@@ -164,9 +208,9 @@ export class InvoicesService {
           notes: input.notes,
           ...totals,
           createdById: user.id,
-          lines: { create: this.lineRows(input.lines) },
-        },
-      });
+        })
+      ).toObject<Invoice>();
+      await Lines.insertMany(this.lineRows(input.lines).map((l) => ({ ...l, invoiceId: inv.id })));
       await log({
         actorId: user.id,
         action: 'invoice.created',
@@ -181,10 +225,9 @@ export class InvoicesService {
   }
 
   async update(id: string, input: UpdateInvoice, user: SessionUser): Promise<InvoiceDetail> {
-    const inv = await this.prisma.db.invoice.findUnique({
-      where: { id },
-      include: { lines: true },
-    });
+    const inv = await this.database.models.Invoice.findById(id)
+      .populate({ path: 'lines' })
+      .lean<Invoice & { lines: InvoiceLine[] }>();
     if (!inv) throw notFound('Invoice');
     if (inv.status !== 'DRAFT') {
       throw conflict(
@@ -198,7 +241,7 @@ export class InvoicesService {
       milestoneId:
         input.milestoneId === undefined ? (inv.milestoneId ?? undefined) : input.milestoneId,
     };
-    await this.validateLinks(this.prisma.db, merged);
+    await this.validateLinks(merged);
     const issueDate = input.issueDate ?? inv.issueDate;
     const dueDate = input.dueDate ?? inv.dueDate;
     if (dueDate < issueDate) {
@@ -207,13 +250,12 @@ export class InvoicesService {
     const taxPercent = input.taxPercent ?? inv.taxPercent;
     const lines = input.lines ?? inv.lines;
     const totals = invoiceTotals(lines, taxPercent);
-    await this.activity.transaction(async (tx, log) => {
-      // Re-check under a row lock: the invoice may have been sent since it was read.
-      await tx.$queryRaw`SELECT id FROM "Invoice" WHERE id = ${id} FOR UPDATE`;
-      const current = await tx.invoice.findUniqueOrThrow({
-        where: { id },
-        select: { status: true },
-      });
+    await this.activity.transaction(async (log) => {
+      const { Invoice: Invoices, InvoiceLine: Lines } = this.database.models;
+      // Re-check under a lock: the invoice may have been sent since it was read.
+      await this.database.lock('Invoice', id);
+      const current = await Invoices.findById(id, { status: 1 }).lean();
+      if (!current) throw new RecordNotFoundError('Invoice');
       if (current.status !== 'DRAFT') {
         throw conflict(
           'INVOICE_LOCKED',
@@ -221,24 +263,24 @@ export class InvoicesService {
         );
       }
       if (input.lines) {
-        await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
-        await tx.invoiceLine.createMany({
-          data: this.lineRows(input.lines).map((l) => ({ ...l, invoiceId: id })),
-        });
+        await Lines.deleteMany({ invoiceId: id });
+        await Lines.insertMany(this.lineRows(input.lines).map((l) => ({ ...l, invoiceId: id })));
       }
-      await tx.invoice.update({
-        where: { id },
-        data: {
-          clientId: merged.clientId,
-          projectId: merged.projectId ?? null,
-          milestoneId: merged.milestoneId ?? null,
-          issueDate,
-          dueDate,
-          taxPercent,
-          notes: input.notes ?? inv.notes,
-          ...totals,
+      await Invoices.updateOne(
+        { _id: id },
+        {
+          $set: {
+            clientId: merged.clientId,
+            projectId: merged.projectId ?? null,
+            milestoneId: merged.milestoneId ?? null,
+            issueDate,
+            dueDate,
+            taxPercent,
+            notes: input.notes ?? inv.notes,
+            ...totals,
+          },
         },
-      });
+      );
       await log({
         actorId: user.id,
         action: 'invoice.updated',
@@ -252,23 +294,22 @@ export class InvoicesService {
   }
 
   async send(id: string, user: SessionUser): Promise<InvoiceDetail> {
-    const inv = await this.prisma.db.invoice.findUnique({
-      where: { id },
-      include: { client: true },
-    });
+    const inv = await this.database.models.Invoice.findById(id)
+      .populate({ path: 'client', select: { name: 1 } })
+      .lean<Invoice & { client: Pick<Client, '_id' | 'id' | 'name'> }>();
     if (!inv) throw notFound('Invoice');
     if (inv.status !== 'DRAFT')
       throw conflict('INVOICE_NOT_DRAFT', 'This invoice was already sent.');
     if (inv.total <= 0) {
       throw unprocessable('ZERO_TOTAL', 'An invoice must have a total above ₹0 before it is sent.');
     }
-    await this.activity.transaction(async (tx, log) => {
+    await this.activity.transaction(async (log) => {
       // Guarded transition: a concurrent send or void cannot both succeed.
-      const { count } = await tx.invoice.updateMany({
-        where: { id, status: 'DRAFT' },
-        data: { status: 'SENT', sentAt: new Date() },
-      });
-      if (count === 0) throw conflict('INVOICE_NOT_DRAFT', 'This invoice was already sent.');
+      const { matchedCount } = await this.database.models.Invoice.updateMany(
+        { _id: id, status: 'DRAFT' },
+        { $set: { status: 'SENT', sentAt: new Date() } },
+      );
+      if (matchedCount === 0) throw conflict('INVOICE_NOT_DRAFT', 'This invoice was already sent.');
       await log({
         actorId: user.id,
         action: 'invoice.sent',
@@ -282,26 +323,34 @@ export class InvoicesService {
   }
 
   /** Category of the ledger entry a payment posts: advance, milestone or final, by milestone order. */
-  private async incomeCategory(tx: Db, milestoneId: string | null): Promise<FinanceCategory> {
+  private async incomeCategory(milestoneId: string | null): Promise<FinanceCategory> {
     if (!milestoneId) return 'MILESTONE';
-    const m = await tx.milestone.findUniqueOrThrow({ where: { id: milestoneId } });
-    const all = await tx.milestone.findMany({
-      where: { projectId: m.projectId },
-      orderBy: { dueDate: 'asc' },
-      select: { id: true },
-    });
-    if (all[0]?.id === m.id) return 'ADVANCE';
-    if (all.at(-1)?.id === m.id) return 'FINAL_PAYMENT';
+    const { Milestone: Milestones } = this.database.models;
+    const m = await Milestones.findById(milestoneId, { projectId: 1 }).lean();
+    if (!m) throw new RecordNotFoundError('Milestone');
+    const all = await Milestones.find({ projectId: m.projectId }, { _id: 1 })
+      .sort({ dueDate: 1 })
+      .lean();
+    if (all[0]?._id === m._id) return 'ADVANCE';
+    if (all.at(-1)?._id === m._id) return 'FINAL_PAYMENT';
     return 'MILESTONE';
   }
 
   async recordPayment(id: string, input: RecordPayment, user: SessionUser): Promise<InvoiceDetail> {
-    await this.activity.transaction(async (tx, log) => {
-      await tx.$queryRaw`SELECT id FROM "Invoice" WHERE id = ${id} FOR UPDATE`;
-      const inv = await tx.invoice.findUnique({
-        where: { id },
-        include: { payments: true, client: true },
-      });
+    await this.activity.transaction(async (log) => {
+      const { Invoice: Invoices, Payment: Payments, FinancialRecord } = this.database.models;
+      await this.database.lock('Invoice', id);
+      const inv = await Invoices.findById(id)
+        .populate([
+          { path: 'payments', select: { invoiceId: 1, amount: 1 } },
+          { path: 'client', select: { name: 1 } },
+        ])
+        .lean<
+          Invoice & {
+            payments: Pick<Payment, '_id' | 'id' | 'invoiceId' | 'amount'>[];
+            client: Pick<Client, '_id' | 'id' | 'name'>;
+          }
+        >();
       if (!inv) throw notFound('Invoice');
       if (inv.status !== 'SENT' && inv.status !== 'PARTIALLY_PAID') {
         throw conflict('INVOICE_NOT_OPEN', 'Payments can only be recorded against sent invoices.');
@@ -314,23 +363,20 @@ export class InvoicesService {
           `The balance is ${rupees(balance)}; record at most that amount.`,
         );
       }
-      const payment = await tx.payment.create({
-        data: { ...input, invoiceId: id, recordedById: user.id },
-      });
-      await tx.financialRecord.create({
-        data: {
-          kind: 'INCOME',
-          category: await this.incomeCategory(tx, inv.milestoneId),
-          amount: input.amount,
-          occurredOn: input.receivedOn,
-          projectId: inv.projectId,
-          paymentId: payment.id,
-          note: `Payment for ${inv.number}`,
-        },
-      });
+      const payment = await Payments.create({ ...input, invoiceId: id, recordedById: user.id });
+      // Ledger row in the same transaction as the payment; the unique paymentId index allows one.
+      await FinancialRecord.create({
+        kind: 'INCOME',
+        category: await this.incomeCategory(inv.milestoneId),
+        amount: input.amount,
+        occurredOn: input.receivedOn,
+        projectId: inv.projectId,
+        paymentId: payment._id,
+        note: `Payment for ${inv.number}`,
+      } satisfies Partial<FinancialRecord>);
       const status = invoiceStatusAfterPayments(inv.status, inv.total, paid + input.amount);
-      await tx.invoice.update({ where: { id }, data: { status } });
-      await this.notifications.notifyUsers(tx, [inv.createdById], {
+      await Invoices.updateOne({ _id: id }, { $set: { status } });
+      await this.notifications.notifyUsers([inv.createdById], {
         kind: 'finance.payment',
         title:
           status === 'PAID' ? `Invoice ${inv.number} paid in full` : `Payment on ${inv.number}`,
@@ -351,35 +397,33 @@ export class InvoicesService {
   }
 
   async void(id: string, input: VoidInvoice, user: SessionUser): Promise<InvoiceDetail> {
-    const inv = await this.prisma.db.invoice.findUnique({
-      where: { id },
-      include: { payments: true },
-    });
+    const { Invoice: Invoices, Payment: Payments } = this.database.models;
+    const inv = await Invoices.findById(id).lean<Invoice>();
     if (!inv) throw notFound('Invoice');
     if (inv.status === 'VOID') throw conflict('INVOICE_VOID', 'This invoice is already void.');
-    if (inv.payments.length > 0) {
+    if ((await Payments.countDocuments({ invoiceId: id })) > 0) {
       throw conflict('INVOICE_HAS_PAYMENTS', 'An invoice with recorded payments cannot be voided.');
     }
-    await this.activity.transaction(async (tx, log) => {
-      await tx.$queryRaw`SELECT id FROM "Invoice" WHERE id = ${id} FOR UPDATE`;
-      const fresh = await tx.invoice.findUniqueOrThrow({
-        where: { id },
-        include: { _count: { select: { payments: true } } },
-      });
+    await this.activity.transaction(async (log) => {
+      await this.database.lock('Invoice', id);
+      const fresh = await Invoices.findById(id, { status: 1 }).lean();
+      if (!fresh) throw new RecordNotFoundError('Invoice');
       if (fresh.status === 'VOID') throw conflict('INVOICE_VOID', 'This invoice is already void.');
-      if (fresh._count.payments > 0) {
+      if ((await Payments.countDocuments({ invoiceId: id })) > 0) {
         throw conflict(
           'INVOICE_HAS_PAYMENTS',
           'An invoice with recorded payments cannot be voided.',
         );
       }
-      await tx.invoice.update({
-        where: { id },
-        data: {
-          status: 'VOID',
-          notes: [inv.notes, `Voided: ${input.reason}`].filter(Boolean).join('\n'),
+      await Invoices.updateOne(
+        { _id: id },
+        {
+          $set: {
+            status: 'VOID',
+            notes: [inv.notes, `Voided: ${input.reason}`].filter(Boolean).join('\n'),
+          },
         },
-      });
+      );
       await log({
         actorId: user.id,
         action: 'invoice.voided',
@@ -395,31 +439,40 @@ export class InvoicesService {
   // ── Overview ──────────────────────────────────────────────────────────────
 
   async overview(): Promise<FinanceOverview> {
+    const {
+      Invoice: Invoices,
+      Expense: Expenses,
+      Project: Projects,
+      FinancialRecord,
+    } = this.database.models;
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const [invoices, expenses, projects, monthIncome, monthPaidExpenses] = await Promise.all([
-      this.prisma.db.invoice.findMany({ include: summaryInclude }),
-      this.prisma.db.expense.findMany({ select: { status: true, amount: true, projectId: true } }),
-      this.prisma.db.project.findMany({
-        where: { status: { in: ['ACTIVE', 'ON_HOLD'] } },
-        select: {
-          id: true,
-          code: true,
-          title: true,
-          budget: true,
-          finances: { select: { kind: true, amount: true } },
-          invoices: { where: { status: { not: 'VOID' } }, select: { total: true } },
-        },
-        orderBy: { dueDate: 'asc' },
+      Invoices.find().populate(summaryPopulate).lean<SummaryRow[]>(),
+      Expenses.find({}, { status: 1, amount: 1, projectId: 1 }).lean(),
+      Projects.find({ status: { $in: ['ACTIVE', 'ON_HOLD'] } }, { code: 1, title: 1, budget: 1 })
+        .populate([
+          { path: 'finances', select: { projectId: 1, kind: 1, amount: 1 } },
+          {
+            path: 'invoices',
+            match: { status: { $ne: 'VOID' } },
+            select: { projectId: 1, total: 1 },
+          },
+        ])
+        .sort({ dueDate: 1 })
+        .lean<
+          (Pick<Project, '_id' | 'id' | 'code' | 'title' | 'budget'> & {
+            finances: Pick<FinancialRecord, 'kind' | 'amount'>[];
+            invoices: Pick<Invoice, 'total'>[];
+          })[]
+        >(),
+      // Aggregation does not cast: `monthStart` is already a Date.
+      sumAmount(FinancialRecord, {
+        kind: 'INCOME',
+        paymentId: { $ne: null },
+        occurredOn: { $gte: monthStart },
       }),
-      this.prisma.db.financialRecord.aggregate({
-        where: { kind: 'INCOME', paymentId: { not: null }, occurredOn: { gte: monthStart } },
-        _sum: { amount: true },
-      }),
-      this.prisma.db.expense.aggregate({
-        where: { status: 'PAID', paidAt: { gte: monthStart } },
-        _sum: { amount: true },
-      }),
+      sumAmount(Expenses, { status: 'PAID', paidAt: { $gte: monthStart } }),
     ]);
     const summaries = invoices.map((i) => toSummary(i, now));
     const open = summaries.filter((s) => s.status === 'SENT' || s.status === 'PARTIALLY_PAID');
@@ -447,14 +500,14 @@ export class InvoicesService {
         approvedUnpaid: expenses
           .filter((e) => e.status === 'APPROVED')
           .reduce((n, e) => n + e.amount, 0),
-        paidThisMonth: monthPaidExpenses._sum.amount ?? 0,
+        paidThisMonth: monthPaidExpenses,
       },
       invoicedThisMonth: summaries
         .filter(
           (s) => s.status !== 'DRAFT' && s.status !== 'VOID' && new Date(s.issueDate) >= monthStart,
         )
         .reduce((n, s) => n + s.total, 0),
-      collectedThisMonth: monthIncome._sum.amount ?? 0,
+      collectedThisMonth: monthIncome,
       budgetVsActual: projects.map((p) => {
         const actual = p.finances
           .filter((f) => f.kind === 'EXPENSE')

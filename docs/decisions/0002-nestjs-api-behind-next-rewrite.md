@@ -1,6 +1,6 @@
 # ADR-0002 — Separate NestJS API, reached through a Next.js rewrite
 
-**Status:** Accepted (2026-11-22)
+**Status:** Superseded by [ADR-0014](0014-mongodb-and-single-vercel-app.md) — originally accepted (2026-11-22)
 
 ## Context
 

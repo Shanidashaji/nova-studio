@@ -8,68 +8,83 @@ import {
 } from '@nova/shared';
 import { RequirePermissions } from '../../common/decorators';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe';
-import { PrismaService } from '../../database/prisma.service';
+import type {
+  Client as ClientRow,
+  Project as ProjectRow,
+  ProjectStage,
+  Shoot as ShootRow,
+  StageDefinition,
+  Task as TaskRow,
+  TeamMember as TeamMemberRow,
+} from '@nova/db';
+import { containsI } from '../../common/query';
+import { DatabaseService } from '../../database/database.service';
 
 /** Cross-entity search for the command palette and the assistant. */
 @Controller('search')
 export class SearchController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly database: DatabaseService) {}
 
   @Get()
   @RequirePermissions('workspace:read')
   async search(
     @Query(new ZodValidationPipe(SearchQuery)) { q }: SearchQuery,
   ): Promise<SearchResult[]> {
-    const contains = { contains: q, mode: 'insensitive' as const };
+    const contains = containsI(q);
+    const { Project, Task, Client, TeamMember, Asset, Shoot, Lead } = this.database.models;
     const [projects, tasks, clients, members, assets, shoots, leads] = await Promise.all([
-      this.prisma.db.project.findMany({
-        where: { OR: [{ title: contains }, { code: contains }, { logline: contains }] },
-        include: {
-          client: true,
-          stages: {
-            where: { status: { in: ['ACTIVE', 'BLOCKED'] } },
-            include: { stageDefinition: true },
+      Project.find({ $or: [{ title: contains }, { code: contains }, { logline: contains }] })
+        .limit(6)
+        .populate([
+          { path: 'client' },
+          {
+            path: 'stages',
+            match: { status: { $in: ['ACTIVE', 'BLOCKED'] } },
+            populate: { path: 'stageDefinition' },
           },
-        },
-        take: 6,
-      }),
-      this.prisma.db.task.findMany({
-        where: { title: contains },
-        include: {
-          project: { select: { id: true, title: true } },
-          assignee: { select: { name: true } },
-        },
-        orderBy: { updatedAt: 'desc' },
-        take: 6,
-      }),
-      this.prisma.db.client.findMany({
-        where: { OR: [{ name: contains }, { industry: contains }] },
-        take: 4,
-      }),
-      this.prisma.db.teamMember.findMany({
-        where: { OR: [{ name: contains }, { title: contains }] },
-        take: 4,
-      }),
-      this.prisma.db.asset.findMany({
-        where: { OR: [{ name: contains }, { serialTag: contains }] },
-        take: 4,
-      }),
-      this.prisma.db.shoot.findMany({
-        where: { OR: [{ title: contains }, { location: contains }] },
-        include: { project: { select: { title: true } } },
-        take: 4,
-      }),
-      this.prisma.db.lead.findMany({
-        where: { OR: [{ title: contains }, { prospectName: contains }] },
-        take: 4,
-      }),
+        ])
+        .lean<
+          (ProjectRow & {
+            client: ClientRow | null;
+            stages: (ProjectStage & { stageDefinition: StageDefinition | null })[];
+          })[]
+        >(),
+      Task.find({ title: contains })
+        .sort({ updatedAt: -1 })
+        .limit(6)
+        .populate([
+          { path: 'project', select: { title: 1 } },
+          { path: 'assignee', select: { name: 1 } },
+        ])
+        .lean<
+          (TaskRow & {
+            project: Pick<ProjectRow, 'id' | 'title'> | null;
+            assignee: Pick<TeamMemberRow, 'name'> | null;
+          })[]
+        >(),
+      Client.find({ $or: [{ name: contains }, { industry: contains }] })
+        .limit(4)
+        .lean(),
+      TeamMember.find({ $or: [{ name: contains }, { title: contains }] })
+        .limit(4)
+        .lean(),
+      Asset.find({ $or: [{ name: contains }, { serialTag: contains }] })
+        .limit(4)
+        .lean(),
+      Shoot.find({ $or: [{ title: contains }, { location: contains }] })
+        .limit(4)
+        .populate({ path: 'project', select: { title: 1 } })
+        .lean<(ShootRow & { project: Pick<ProjectRow, 'title'> | null })[]>(),
+      Lead.find({ $or: [{ title: contains }, { prospectName: contains }] })
+        .limit(4)
+        .lean(),
     ]);
     return [
       ...projects.map((p) => ({
         type: 'project' as const,
         id: p.id,
         title: `${p.code} · ${p.title}`,
-        subtitle: `${p.client.name} · ${p.stages[0] ? STAGE_LABELS[p.stages[0].stageDefinition.key] : p.status.toLowerCase()}`,
+        subtitle: `${p.client?.name ?? ''} · ${p.stages[0]?.stageDefinition ? STAGE_LABELS[p.stages[0].stageDefinition.key] : p.status.toLowerCase()}`,
       })),
       ...clients.map((c) => ({
         type: 'client' as const,
@@ -87,14 +102,14 @@ export class SearchController {
         type: 'task' as const,
         id: t.id,
         title: t.title,
-        subtitle: `${t.project.title} · ${TASK_STATUS_LABELS[t.status]}${t.assignee ? ` · ${t.assignee.name}` : ''}`,
-        projectId: t.project.id,
+        subtitle: `${t.project?.title ?? ''} · ${TASK_STATUS_LABELS[t.status]}${t.assignee ? ` · ${t.assignee.name}` : ''}`,
+        projectId: t.projectId,
       })),
       ...shoots.map((s) => ({
         type: 'shoot' as const,
         id: s.id,
         title: s.title,
-        subtitle: `${s.project.title} · ${s.location}`,
+        subtitle: `${s.project?.title ?? ''} · ${s.location}`,
       })),
       ...assets.map((a) => ({
         type: 'asset' as const,

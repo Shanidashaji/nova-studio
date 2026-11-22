@@ -1,7 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import type { AddFeedback, ApprovalDecision, SendForReview, SessionUser } from '@nova/shared';
+import type {
+  Approval,
+  Client,
+  Deliverable,
+  FeedbackItem,
+  Project,
+  ProjectStage,
+  RevisionRound,
+  StageDefinition,
+} from '@nova/db';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { stageApproved } from '../projects/project.mapper';
 
@@ -12,18 +22,29 @@ import { stageApproved } from '../projects/project.mapper';
 @Injectable()
 export class ReviewsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
   async sendForReview(deliverableId: string, input: SendForReview, user: SessionUser) {
-    const d = await this.prisma.db.deliverable.findUnique({
-      where: { id: deliverableId },
-      include: {
-        project: { include: { stages: { include: { stageDefinition: true } }, client: true } },
-        approvals: { where: { status: 'PENDING' } },
-      },
-    });
+    const { Deliverable, RevisionRound, Approval } = this.database.models;
+    const d = await Deliverable.findById(deliverableId)
+      .populate([
+        {
+          path: 'project',
+          populate: [{ path: 'stages', populate: { path: 'stageDefinition' } }, { path: 'client' }],
+        },
+        { path: 'approvals', match: { status: 'PENDING' } },
+      ])
+      .lean<
+        Deliverable & {
+          project: Project & {
+            stages: (ProjectStage & { stageDefinition: StageDefinition })[];
+            client: Client;
+          };
+          approvals: Approval[];
+        }
+      >();
     if (!d) throw notFound('Deliverable');
     if (d.status === 'DELIVERED' || d.status === 'APPROVED') {
       throw conflict('ALREADY_APPROVED', `${d.name} is already approved.`);
@@ -38,28 +59,30 @@ export class ReviewsService {
     const reviewStage = d.project.stages.find((s) => s.stageDefinition.key === 'REVIEW');
     const inScope = version <= d.project.includedRevisions;
 
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.revisionRound.updateMany({
-        where: { deliverableId, closedAt: null },
-        data: { closedAt: new Date() },
+    const row = await this.database.transaction(async () => {
+      await RevisionRound.updateMany(
+        { deliverableId, closedAt: null },
+        { $set: { closedAt: new Date() } },
+      );
+      await RevisionRound.create({
+        deliverableId,
+        number: version,
+        sentAt: new Date(),
+        includedInScope: inScope,
       });
-      await tx.revisionRound.create({
-        data: { deliverableId, number: version, sentAt: new Date(), includedInScope: inScope },
+      const updated = await Deliverable.updateOne(
+        { _id: deliverableId },
+        { $set: { status: 'IN_REVIEW', currentVersion: version } },
+      );
+      if (updated.matchedCount === 0) throw notFound('Deliverable');
+      await Approval.create({
+        kind: 'CLIENT',
+        deliverableId,
+        projectStageId: reviewStage?.id ?? null,
+        title: `Client approval — ${d.name} v${version}`,
+        note: input.note,
       });
-      await tx.deliverable.update({
-        where: { id: deliverableId },
-        data: { status: 'IN_REVIEW', currentVersion: version },
-      });
-      await tx.approval.create({
-        data: {
-          kind: 'CLIENT',
-          deliverableId,
-          projectStageId: reviewStage?.id ?? null,
-          title: `Client approval — ${d.name} v${version}`,
-          note: input.note,
-        },
-      });
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         action: 'approval.requested',
         entityType: 'deliverable',
@@ -73,13 +96,19 @@ export class ReviewsService {
   }
 
   async decide(approvalId: string, input: ApprovalDecision, user: SessionUser) {
-    const approval = await this.prisma.db.approval.findUnique({
-      where: { id: approvalId },
-      include: {
-        deliverable: { include: { project: true } },
-        projectStage: { include: { project: true, stageDefinition: true } },
-      },
-    });
+    const { Approval, Deliverable, RevisionRound } = this.database.models;
+    const approval = await Approval.findById(approvalId)
+      .populate([
+        { path: 'deliverable', populate: { path: 'project' } },
+        { path: 'projectStage', populate: [{ path: 'project' }, { path: 'stageDefinition' }] },
+      ])
+      .lean<
+        Approval & {
+          deliverable: (Deliverable & { project: Project | null }) | null;
+          projectStage:
+            (ProjectStage & { project: Project | null; stageDefinition: StageDefinition }) | null;
+        }
+      >();
     if (!approval) throw notFound('Approval');
     if (approval.status !== 'PENDING')
       throw conflict('ALREADY_DECIDED', 'This approval has already been decided.');
@@ -87,32 +116,35 @@ export class ReviewsService {
     if (!project)
       throw unprocessable('ORPHAN_APPROVAL', 'This approval is not linked to a project.');
 
-    const row = await this.prisma.db.$transaction(async (tx) => {
+    const row = await this.database.transaction(async () => {
       // Guarded write: of two simultaneous decisions only the first is recorded.
-      const decided = await tx.approval.updateMany({
-        where: { id: approvalId, status: 'PENDING' },
-        data: {
-          status: input.status,
-          note: input.note,
-          decidedAt: new Date(),
-          decidedBy: input.decidedBy ?? user.name,
+      const decided = await Approval.updateMany(
+        { _id: approvalId, status: 'PENDING' },
+        {
+          $set: {
+            status: input.status,
+            note: input.note,
+            decidedAt: new Date(),
+            decidedBy: input.decidedBy ?? user.name,
+          },
         },
-      });
-      if (decided.count === 0) {
+      );
+      if (decided.matchedCount === 0) {
         throw conflict('ALREADY_DECIDED', 'This approval has already been decided.');
       }
       if (approval.deliverableId) {
-        await tx.deliverable.update({
-          where: { id: approval.deliverableId },
-          data: { status: input.status === 'APPROVED' ? 'APPROVED' : 'CHANGES_REQUESTED' },
-        });
-        await tx.revisionRound.updateMany({
-          where: { deliverableId: approval.deliverableId, closedAt: null },
-          data: { closedAt: new Date() },
-        });
+        const updated = await Deliverable.updateOne(
+          { _id: approval.deliverableId },
+          { $set: { status: input.status === 'APPROVED' ? 'APPROVED' : 'CHANGES_REQUESTED' } },
+        );
+        if (updated.matchedCount === 0) throw notFound('Deliverable');
+        await RevisionRound.updateMany(
+          { deliverableId: approval.deliverableId, closedAt: null },
+          { $set: { closedAt: new Date() } },
+        );
       }
       const verb = input.status === 'APPROVED' ? 'approved' : 'requested changes on';
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         action: 'approval.decided',
         entityType: approval.deliverableId ? 'deliverable' : 'project',
@@ -128,10 +160,20 @@ export class ReviewsService {
 
   /** Requests sign-off on a stage that requires approval (e.g. the Brief's creative treatment). */
   async requestStageApproval(stageId: string, input: SendForReview, user: SessionUser) {
-    const stage = await this.prisma.db.projectStage.findUnique({
-      where: { id: stageId },
-      include: { stageDefinition: true, project: { include: { client: true } }, approvals: true },
-    });
+    const { ProjectStage, Approval } = this.database.models;
+    const stage = await ProjectStage.findById(stageId)
+      .populate([
+        { path: 'stageDefinition' },
+        { path: 'project', populate: { path: 'client' } },
+        { path: 'approvals' },
+      ])
+      .lean<
+        ProjectStage & {
+          stageDefinition: StageDefinition;
+          project: Project & { client: Client };
+          approvals: Approval[];
+        }
+      >();
     if (!stage) throw notFound('Stage');
     if (!stage.stageDefinition.requiresApproval) {
       throw unprocessable(
@@ -166,16 +208,14 @@ export class ReviewsService {
         `${stage.stageDefinition.label} has already been signed off.`,
       );
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.approval.create({
-        data: {
-          kind: 'CLIENT',
-          projectStageId: stageId,
-          title: `${stage.stageDefinition.label} sign-off`,
-          note: input.note,
-        },
+    const row = await this.database.transaction(async () => {
+      await Approval.create({
+        kind: 'CLIENT',
+        projectStageId: stageId,
+        title: `${stage.stageDefinition.label} sign-off`,
+        note: input.note,
       });
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         action: 'approval.requested',
         entityType: 'project',
@@ -189,11 +229,11 @@ export class ReviewsService {
   }
 
   async addFeedback(deliverableId: string, input: AddFeedback, user: SessionUser) {
-    const round = await this.prisma.db.revisionRound.findFirst({
-      where: { deliverableId },
-      orderBy: { number: 'desc' },
-      include: { deliverable: { include: { project: true } } },
-    });
+    const { RevisionRound, FeedbackItem } = this.database.models;
+    const round = await RevisionRound.findOne({ deliverableId })
+      .sort({ number: -1 })
+      .populate({ path: 'deliverable', populate: { path: 'project' } })
+      .lean<RevisionRound & { deliverable: Deliverable & { project: Project } }>();
     if (!round)
       throw unprocessable('NO_ROUND', 'Send a version for review before adding feedback.');
     if (round.deliverable.status === 'APPROVED' || round.deliverable.status === 'DELIVERED') {
@@ -202,9 +242,11 @@ export class ReviewsService {
         `${round.deliverable.name} is approved; send a new version to reopen feedback.`,
       );
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const item = await tx.feedbackItem.create({ data: { revisionRoundId: round.id, ...input } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const item = (
+        await FeedbackItem.create({ revisionRoundId: round.id, ...input })
+      ).toObject<FeedbackItem>();
+      return this.activity.record({
         actorId: user.id,
         action: 'feedback.added',
         entityType: 'deliverable',
@@ -218,14 +260,15 @@ export class ReviewsService {
   }
 
   async setFeedbackStatus(feedbackId: string, status: 'OPEN' | 'RESOLVED', user: SessionUser) {
-    const item = await this.prisma.db.feedbackItem.findUnique({
-      where: { id: feedbackId },
-      include: { revisionRound: { include: { deliverable: true } } },
-    });
+    const { FeedbackItem } = this.database.models;
+    const item = await FeedbackItem.findById(feedbackId)
+      .populate({ path: 'revisionRound', populate: { path: 'deliverable' } })
+      .lean<FeedbackItem & { revisionRound: RevisionRound & { deliverable: Deliverable } }>();
     if (!item) throw notFound('Feedback');
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.feedbackItem.update({ where: { id: feedbackId }, data: { status } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const updated = await FeedbackItem.updateOne({ _id: feedbackId }, { $set: { status } });
+      if (updated.matchedCount === 0) throw notFound('Feedback');
+      return this.activity.record({
         actorId: user.id,
         action: 'feedback.status',
         entityType: 'deliverable',

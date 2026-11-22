@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  canSeeProjectMoney,
   evaluateBackwardTransition,
   evaluateForwardTransition,
   STAGE_LABELS,
@@ -11,18 +12,26 @@ import {
   type TransitionRequest,
   type UpdateProject,
 } from '@nova/shared';
-import type { Prisma } from '@nova/db';
+import type { Project, ProjectStage, StageDefinition, WorkflowTemplate } from '@nova/db';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { allocateProjectCode } from '../../common/numbering';
+import { containsI } from '../../common/query';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { ScheduleConflicts } from '../schedule/schedule-conflicts';
 import {
-  detailInclude,
+  detailFor,
+  detailPopulate,
   stageSnapshots,
-  summaryInclude,
+  summaryFor,
+  summaryPopulate,
   taskSnapshots,
   toDetail,
   toSummary,
+  type DetailRow,
+  type FullProjectSummary,
+  type SummaryRow,
+  type Viewer,
 } from './project.mapper';
 
 const HEALTH_ORDER = { CRITICAL: 0, AT_RISK: 1, ON_TRACK: 2 } as const;
@@ -30,29 +39,39 @@ const HEALTH_ORDER = { CRITICAL: 0, AT_RISK: 1, ON_TRACK: 2 } as const;
 @Injectable()
 export class ProjectsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
     private readonly conflicts: ScheduleConflicts,
   ) {}
 
-  /** All projects as summaries — the working set is small, so filtering by computed fields happens in memory. */
-  async list(query: ProjectListQuery): Promise<ProjectSummary[]> {
-    const where: Prisma.ProjectWhereInput = {
-      ...(query.status === 'ACTIVE' ? { status: { in: ['ACTIVE', 'ON_HOLD'] } } : {}),
+  /**
+   * All projects as summaries — the working set is small, so filtering by computed fields happens
+   * in memory. `viewer` decides whether budget and spend are included (`canSeeProjectMoney`).
+   */
+  async list(query: ProjectListQuery, viewer: Viewer): Promise<ProjectSummary[]> {
+    const { Project, ProjectMember, Client } = this.database.models;
+    const where: Record<string, unknown> = {
+      ...(query.status === 'ACTIVE' ? { status: { $in: ['ACTIVE', 'ON_HOLD'] } } : {}),
       ...(query.status === 'DELIVERED' ? { status: 'DELIVERED' } : {}),
       ...(query.clientId ? { clientId: query.clientId } : {}),
-      ...(query.memberId ? { members: { some: { teamMemberId: query.memberId } } } : {}),
+      ...(query.memberId
+        ? {
+            _id: {
+              $in: await ProjectMember.distinct('projectId', { teamMemberId: query.memberId }),
+            },
+          }
+        : {}),
       ...(query.q
         ? {
-            OR: [
-              { title: { contains: query.q, mode: 'insensitive' } },
-              { code: { contains: query.q, mode: 'insensitive' } },
-              { client: { name: { contains: query.q, mode: 'insensitive' } } },
+            $or: [
+              { title: containsI(query.q) },
+              { code: containsI(query.q) },
+              { clientId: { $in: await Client.distinct('_id', { name: containsI(query.q) }) } },
             ],
           }
         : {}),
     };
-    const rows = await this.prisma.db.project.findMany({ where, include: summaryInclude });
+    const rows = await Project.find(where).populate(summaryPopulate).lean<SummaryRow[]>();
     const now = new Date();
     let items = rows.map((p) => toSummary(p, now));
     if (query.stage) items = items.filter((p) => p.stage?.key === query.stage);
@@ -60,7 +79,7 @@ export class ProjectsService {
 
     const sorters: Record<
       ProjectListQuery['sort'],
-      (a: ProjectSummary, b: ProjectSummary) => number
+      (a: FullProjectSummary, b: FullProjectSummary) => number
     > = {
       due: (a, b) => a.dueDate.localeCompare(b.dueDate),
       health: (a, b) =>
@@ -70,33 +89,37 @@ export class ProjectsService {
       title: (a, b) => a.title.localeCompare(b.title),
       budget: (a, b) => b.budget - a.budget,
     };
-    return items.sort(sorters[query.sort]);
+    // Ordering by budget would reveal the ranking to a caller who may not see the figures.
+    const sort =
+      query.sort === 'budget' && !canSeeProjectMoney(viewer.permissions) ? 'due' : query.sort;
+    return items.sort(sorters[sort]).map((p) => summaryFor(p, viewer));
   }
 
-  async get(id: string): Promise<ProjectDetail> {
-    const project = await this.prisma.db.project.findUnique({
-      where: { id },
-      include: detailInclude,
-    });
+  async get(id: string, viewer: Viewer): Promise<ProjectDetail> {
+    const project = await this.database.models.Project.findById(id)
+      .populate(detailPopulate)
+      .lean<DetailRow>();
     if (!project) throw notFound('Project');
     const conflicts = await this.conflicts.forShoots(project.shoots.map((s) => s.id));
-    return toDetail(project, new Date(), conflicts);
+    return detailFor(toDetail(project, new Date(), conflicts), viewer);
   }
 
   async create(input: CreateProject, user: SessionUser): Promise<ProjectDetail> {
-    const template = await this.prisma.db.workflowTemplate.findUnique({
-      where: { id: input.workflowTemplateId },
-      include: { stages: { orderBy: { order: 'asc' } } },
-    });
+    const { Project, ProjectStage, StageTransition, WorkflowTemplate, Client } =
+      this.database.models;
+    const template = await WorkflowTemplate.findById(input.workflowTemplateId)
+      .populate({ path: 'stages', options: { sort: { order: 1 } } })
+      .lean<WorkflowTemplate & { stages: StageDefinition[] }>();
     if (!template) throw unprocessable('INVALID_TEMPLATE', 'Choose an existing workflow template.');
-    const client = await this.prisma.db.client.findUnique({ where: { id: input.clientId } });
+    const client = await Client.findById(input.clientId).lean();
     if (!client) throw unprocessable('INVALID_CLIENT', 'Choose an existing client.');
 
     const now = new Date();
-    const project = await this.prisma.db.$transaction(async (tx) => {
-      const code = await nextProjectCode(tx, now);
-      const created = await tx.project.create({
-        data: {
+    const project = await this.database.transaction(async () => {
+      // Serialised allocation: concurrent creators never receive the same code.
+      const code = await allocateProjectCode(this.database, now);
+      const created = (
+        await Project.create({
           code,
           title: input.title,
           logline: input.logline,
@@ -110,30 +133,26 @@ export class ProjectsService {
           budget: input.budget,
           includedRevisions: input.includedRevisions,
           aiAssisted: input.aiAssisted,
-        },
-      });
+        })
+      ).toObject<Project>();
       let firstStageId: string | null = null;
       for (const [i, def] of template.stages.entries()) {
-        const stage = await tx.projectStage.create({
-          data: {
-            projectId: created.id,
-            stageDefinitionId: def.id,
-            status: i === 0 ? 'ACTIVE' : 'PENDING',
-            startedAt: i === 0 ? now : null,
-          },
+        const stage = await ProjectStage.create({
+          projectId: created.id,
+          stageDefinitionId: def.id,
+          status: i === 0 ? 'ACTIVE' : 'PENDING',
+          startedAt: i === 0 ? now : null,
         });
         if (i === 0) firstStageId = stage.id;
       }
-      await tx.stageTransition.create({
-        data: {
-          projectId: created.id,
-          toStageId: firstStageId,
-          direction: 'FORWARD',
-          actorId: user.id,
-          reason: 'Project opened',
-        },
+      await StageTransition.create({
+        projectId: created.id,
+        toStageId: firstStageId,
+        direction: 'FORWARD',
+        actorId: user.id,
+        reason: 'Project opened',
       });
-      const row = await this.activity.record(tx, {
+      const row = await this.activity.record({
         actorId: user.id,
         action: 'project.created',
         entityType: 'project',
@@ -144,11 +163,12 @@ export class ProjectsService {
       return { created, row };
     });
     this.activity.publish(project.row);
-    return this.get(project.created.id);
+    return this.get(project.created.id, user);
   }
 
   async update(id: string, input: UpdateProject, user: SessionUser): Promise<ProjectDetail> {
-    const before = await this.prisma.db.project.findUnique({ where: { id } });
+    const { Project } = this.database.models;
+    const before = await Project.findById(id).lean<Project>();
     if (!before) throw notFound('Project');
     // Delivery is the end of the workflow: it is reached by completing the last stage, and a
     // delivered project is a closed record. Editing the status may only pause, resume or cancel.
@@ -164,11 +184,12 @@ export class ProjectsService {
     const changes = Object.entries(input).filter(
       ([k, v]) => v !== undefined && String(v) !== String(before[k as keyof typeof before]),
     );
-    if (changes.length === 0) return this.get(id);
+    if (changes.length === 0) return this.get(id, user);
 
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.project.update({ where: { id }, data: input });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const updated = await Project.updateOne({ _id: id }, { $set: input });
+      if (updated.matchedCount === 0) throw notFound('Project');
+      return this.activity.record({
         actorId: user.id,
         action: 'project.updated',
         entityType: 'project',
@@ -184,15 +205,20 @@ export class ProjectsService {
       });
     });
     this.activity.publish(row);
-    return this.get(id);
+    return this.get(id, user);
   }
 
   /** Skips a future stage the workflow template marks as skippable (e.g. pre-production on a reel). */
   async skipStage(projectId: string, stageId: string, user: SessionUser): Promise<ProjectDetail> {
-    const stage = await this.prisma.db.projectStage.findFirst({
-      where: { id: stageId, projectId },
-      include: { stageDefinition: true, project: { select: { title: true, status: true } } },
-    });
+    const { ProjectStage } = this.database.models;
+    const stage = await ProjectStage.findOne({ _id: stageId, projectId })
+      .populate([{ path: 'stageDefinition' }, { path: 'project', select: { title: 1, status: 1 } }])
+      .lean<
+        ProjectStage & {
+          stageDefinition: StageDefinition;
+          project: Pick<Project, '_id' | 'id' | 'title' | 'status'>;
+        }
+      >();
     if (!stage) throw notFound('Stage');
     if (stage.project.status === 'DELIVERED' || stage.project.status === 'CANCELLED') {
       throw unprocessable(
@@ -209,16 +235,16 @@ export class ProjectsService {
     if (stage.status !== 'PENDING') {
       throw unprocessable('NOT_PENDING', 'Only stages that have not started can be skipped.');
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
+    const row = await this.database.transaction(async () => {
       // Guarded write: the stage may have been started by a transition since it was read.
-      const skipped = await tx.projectStage.updateMany({
-        where: { id: stageId, status: 'PENDING' },
-        data: { status: 'SKIPPED' },
-      });
-      if (skipped.count === 0) {
+      const skipped = await ProjectStage.updateMany(
+        { _id: stageId, status: 'PENDING' },
+        { $set: { status: 'SKIPPED' } },
+      );
+      if (skipped.matchedCount === 0) {
         throw conflict('NOT_PENDING', 'This stage has already started and cannot be skipped.');
       }
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         action: 'project.stage.skipped',
         entityType: 'project',
@@ -228,7 +254,7 @@ export class ProjectsService {
       });
     });
     this.activity.publish(row);
-    return this.get(projectId);
+    return this.get(projectId, user);
   }
 
   /** Moves the project through its workflow, enforcing the shared transition rules. */
@@ -238,10 +264,8 @@ export class ProjectsService {
     user: SessionUser,
     source: 'UI' | 'ASSISTANT' = 'UI',
   ): Promise<ProjectDetail> {
-    const project = await this.prisma.db.project.findUnique({
-      where: { id },
-      include: summaryInclude,
-    });
+    const { Project, ProjectStage, Deliverable, StageTransition } = this.database.models;
+    const project = await Project.findById(id).populate(summaryPopulate).lean<SummaryRow>();
     if (!project) throw notFound('Project');
     const stages = stageSnapshots(project.stages);
     const evaluation =
@@ -271,17 +295,19 @@ export class ProjectsService {
 
     const { from, to } = evaluation;
     const now = new Date();
-    const row = await this.prisma.db.$transaction(async (tx) => {
+    const row = await this.database.transaction(async () => {
       // The rules were evaluated on a snapshot. Leaving the stage is a guarded write, so two
       // simultaneous requests cannot both move the project out of the same stage.
-      const left = await tx.projectStage.updateMany({
-        where: { id: from.id, status: { in: ['ACTIVE', 'BLOCKED'] } },
-        data:
-          input.direction === 'FORWARD'
-            ? { status: 'DONE', completedAt: now }
-            : { status: 'PENDING', completedAt: null },
-      });
-      if (left.count === 0) {
+      const left = await ProjectStage.updateMany(
+        { _id: from.id, status: { $in: ['ACTIVE', 'BLOCKED'] } },
+        {
+          $set:
+            input.direction === 'FORWARD'
+              ? { status: 'DONE', completedAt: now }
+              : { status: 'PENDING', completedAt: null },
+        },
+      );
+      if (left.matchedCount === 0) {
         throw conflict(
           'STAGE_CHANGED',
           `${project.title} has already moved on from ${from.label}. Reload and try again.`,
@@ -289,44 +315,45 @@ export class ProjectsService {
       }
       if (input.direction === 'FORWARD') {
         if (to) {
-          await tx.projectStage.update({
-            where: { id: to.id },
-            data: { status: 'ACTIVE', startedAt: now, completedAt: null },
-          });
+          const started = await ProjectStage.updateOne(
+            { _id: to.id },
+            { $set: { status: 'ACTIVE', startedAt: now, completedAt: null } },
+          );
+          if (started.matchedCount === 0) throw notFound('Stage');
         } else {
-          await tx.project.update({
-            where: { id },
-            data: { status: 'DELIVERED', deliveredAt: now },
-          });
-          await tx.deliverable.updateMany({
-            where: { projectId: id, status: 'APPROVED' },
-            data: { status: 'DELIVERED' },
-          });
+          const delivered = await Project.updateOne(
+            { _id: id },
+            { $set: { status: 'DELIVERED', deliveredAt: now } },
+          );
+          if (delivered.matchedCount === 0) throw notFound('Project');
+          await Deliverable.updateMany(
+            { projectId: id, status: 'APPROVED' },
+            { $set: { status: 'DELIVERED' } },
+          );
         }
       } else {
         // Sending work back: the target becomes active again; it and everything after it reopen.
         const reopen = stages
           .filter((s) => s.order > to!.order && s.status !== 'SKIPPED')
           .map((s) => s.id);
-        await tx.projectStage.updateMany({
-          where: { id: { in: reopen } },
-          data: { status: 'PENDING', completedAt: null },
-        });
-        await tx.projectStage.update({
-          where: { id: to!.id },
-          data: { status: 'ACTIVE', startedAt: now, completedAt: null },
-        });
+        await ProjectStage.updateMany(
+          { _id: { $in: reopen } },
+          { $set: { status: 'PENDING', completedAt: null } },
+        );
+        const restarted = await ProjectStage.updateOne(
+          { _id: to!.id },
+          { $set: { status: 'ACTIVE', startedAt: now, completedAt: null } },
+        );
+        if (restarted.matchedCount === 0) throw notFound('Stage');
       }
-      await tx.stageTransition.create({
-        data: {
-          projectId: id,
-          fromStageId: from.id,
-          toStageId: to?.id ?? null,
-          direction: input.direction,
-          reason: input.direction === 'BACKWARD' ? input.reason : null,
-          actorId: user.id,
-          source,
-        },
+      await StageTransition.create({
+        projectId: id,
+        fromStageId: from.id,
+        toStageId: to?.id ?? null,
+        direction: input.direction,
+        reason: input.direction === 'BACKWARD' ? input.reason : null,
+        actorId: user.id,
+        source,
       });
       const summary =
         input.direction === 'BACKWARD'
@@ -334,7 +361,7 @@ export class ProjectsService {
           : to
             ? `${user.name} moved ${project.title} from ${from.label} to ${to.label}`
             : `${user.name} completed ${STAGE_LABELS.DELIVERY} — ${project.title} delivered`;
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         source,
         action: to ? 'project.transitioned' : 'project.delivered',
@@ -346,17 +373,6 @@ export class ProjectsService {
       });
     });
     this.activity.publish(row);
-    return this.get(id);
+    return this.get(id, user);
   }
-}
-
-/** Project codes follow NM-YY-NNN; the sequence continues from the highest existing code. */
-async function nextProjectCode(tx: Prisma.TransactionClient, now: Date): Promise<string> {
-  // Serialises concurrent creators for the length of the transaction, so two requests never
-  // read the same "highest" code.
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('nova-seq-project'))`;
-  const year = String(now.getFullYear()).slice(2);
-  const codes = await tx.project.findMany({ select: { code: true } });
-  const max = codes.reduce((n, { code }) => Math.max(n, Number(/(\d+)$/.exec(code)?.[1] ?? 0)), 0);
-  return `NM-${year}-${String(max + 1).padStart(3, '0')}`;
 }

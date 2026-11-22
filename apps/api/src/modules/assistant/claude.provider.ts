@@ -365,15 +365,19 @@ export class ClaudeProvider implements AssistantProvider {
 
     switch (name) {
       case 'get_attention':
-        return this.tools.attention();
+        return this.tools.attention(ctx);
       case 'get_operations_summary':
-        return this.tools.operations();
+        return this.tools.operations(ctx);
       case 'list_projects':
-        return this.tools.projectsBy(input.filter as 'delayed', input.days as number | undefined);
+        return this.tools.projectsBy(
+          input.filter as 'delayed',
+          ctx,
+          input.days as number | undefined,
+        );
       case 'get_project':
         return this.tools.project(input.project as string, ctx);
       case 'get_blocked_work':
-        return this.tools.blocked();
+        return this.tools.blocked(ctx);
       case 'get_team_workload':
         return this.tools.workload();
       case 'get_pending_approvals':

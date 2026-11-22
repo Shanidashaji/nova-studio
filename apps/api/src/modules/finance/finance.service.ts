@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import type { FinancialRecord } from '@nova/db';
 import type { CreateFinanceRecord, FinanceSummary, SessionUser } from '@nova/shared';
 import { unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
-import { summaryInclude, toSummary } from '../projects/project.mapper';
+import { summaryPopulate, toSummary, type SummaryRow } from '../projects/project.mapper';
 
 const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 
@@ -11,19 +12,19 @@ const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).pad
 @Injectable()
 export class FinanceService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
   async summary(): Promise<FinanceSummary> {
+    const { FinancialRecord: Records, Project } = this.database.models;
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth() - 5, 1);
     const [records, projects] = await Promise.all([
-      this.prisma.db.financialRecord.findMany({ where: { occurredOn: { gte: start } } }),
-      this.prisma.db.project.findMany({
-        where: { status: { not: 'CANCELLED' } },
-        include: summaryInclude,
-      }),
+      Records.find({ occurredOn: { $gte: start } }).lean<FinancialRecord[]>(),
+      Project.find({ status: { $ne: 'CANCELLED' } })
+        .populate(summaryPopulate)
+        .lean<SummaryRow[]>(),
     ]);
 
     const months = Array.from({ length: 6 }, (_, i) => {
@@ -76,23 +77,24 @@ export class FinanceService {
   }
 
   async create(input: CreateFinanceRecord, user: SessionUser) {
+    const { FinancialRecord: Records, Project } = this.database.models;
     if (input.projectId) {
-      const project = await this.prisma.db.project.findUnique({ where: { id: input.projectId } });
+      const project = await Project.exists({ _id: input.projectId });
       if (!project) throw unprocessable('INVALID_PROJECT', 'Choose an existing project.');
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const record = await tx.financialRecord.create({ data: { ...input, isDemo: true } });
-      const log = await this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const record = await Records.create({ ...input, isDemo: true });
+      const log = await this.activity.record({
         actorId: user.id,
         action: 'finance.recorded',
         entityType: 'finance',
-        entityId: record.id,
+        entityId: record._id,
         projectId: input.projectId ?? null,
         summary: `${user.name} recorded ${input.kind === 'INCOME' ? 'income' : 'an expense'} of ₹${input.amount.toLocaleString('en-IN')} (${input.category.toLowerCase().replace('_', ' ')})`,
       });
-      return { record, log };
+      return { id: record._id, log };
     });
     this.activity.publish(row.log);
-    return { id: row.record.id };
+    return { id: row.id };
   }
 }

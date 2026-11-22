@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  canSeeProjectMoney,
   attentionScore,
   computeFlow,
   daysBetween,
@@ -15,12 +16,27 @@ import {
   type StageKey,
   type UpcomingItem,
 } from '@nova/shared';
-import { PrismaService } from '../../database/prisma.service';
+import type {
+  Approval,
+  Deliverable,
+  Lead,
+  Project,
+  ProjectStage,
+  RevisionRound,
+  Shoot,
+  StageDefinition,
+  Task,
+  TeamMember,
+  WorkflowTemplate,
+} from '@nova/db';
+import { DatabaseService } from '../../database/database.service';
 import {
   stageSnapshots,
-  summaryInclude,
+  summaryPopulate,
   taskSnapshots,
   toSummary,
+  type SummaryRow,
+  type Viewer,
 } from '../projects/project.mapper';
 import { ScheduleConflicts } from '../schedule/schedule-conflicts';
 import { TeamService } from '../team/team.service';
@@ -50,14 +66,37 @@ const fmtDate = (d: Date) =>
 @Injectable()
 export class InsightsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly conflicts: ScheduleConflicts,
     private readonly team: TeamService,
   ) {}
 
-  async pulse(): Promise<PulseView> {
+  /** `viewer` decides whether budget signals are included (`canSeeProjectMoney`). */
+  async pulse(viewer: Viewer): Promise<PulseView> {
     const now = new Date();
+    const showMoney = canSeeProjectMoney(viewer.permissions);
     const horizon = new Date(now.getTime() + 14 * DAY_MS);
+    const {
+      Project: Projects,
+      ProjectStage: ProjectStages,
+      Approval: Approvals,
+      Deliverable: Deliverables,
+      Task: Tasks,
+      Shoot: Shoots,
+      Lead: Leads,
+      WorkflowTemplate: WorkflowTemplates,
+    } = this.database.models;
+
+    // Relation filters ("project is ACTIVE") resolve to id lists first.
+    const activeProjectIds = await Projects.distinct('_id', { status: 'ACTIVE' });
+    const [activeDeliverableIds, activeStageIds, openStageIds] = await Promise.all([
+      Deliverables.distinct('_id', { projectId: { $in: activeProjectIds } }),
+      ProjectStages.distinct('_id', { projectId: { $in: activeProjectIds } }),
+      ProjectStages.distinct('_id', {
+        projectId: { $in: activeProjectIds },
+        status: { $in: ['ACTIVE', 'BLOCKED'] },
+      }),
+    ]);
 
     const [
       projects,
@@ -72,64 +111,65 @@ export class InsightsService {
       leads,
       delivered,
     ] = await Promise.all([
-      this.prisma.db.project.findMany({
-        where: { status: { in: ['ACTIVE', 'ON_HOLD'] } },
-        include: summaryInclude,
-      }),
-      this.prisma.db.projectStage.findMany({
-        where: { startedAt: { not: null } },
-        select: {
-          startedAt: true,
-          completedAt: true,
-          status: true,
-          stageDefinition: { select: { key: true } },
-        },
-      }),
-      this.prisma.db.approval.findMany({
+      Projects.find({ status: { $in: ['ACTIVE', 'ON_HOLD'] } })
+        .populate(summaryPopulate)
+        .lean<SummaryRow[]>(),
+      ProjectStages.find({ startedAt: { $ne: null } })
+        .select({ startedAt: 1, completedAt: 1, status: 1, stageDefinitionId: 1 })
+        .populate({ path: 'stageDefinition', select: { key: 1 } })
+        .lean<
+          (Pick<ProjectStage, 'startedAt' | 'completedAt' | 'status'> & {
+            stageDefinition: Pick<StageDefinition, 'key'> | null;
+          })[]
+        >(),
+      Approvals.find({
         // Active productions only, like every other queue on Pulse.
-        where: {
-          status: 'PENDING',
-          kind: 'CLIENT',
-          OR: [
-            { deliverable: { project: { status: 'ACTIVE' } } },
-            { projectStage: { project: { status: 'ACTIVE' } } },
-          ],
-        },
-        include: {
-          deliverable: { include: { project: true } },
-          projectStage: { include: { project: true } },
-        },
-      }),
-      this.prisma.db.deliverable.findMany({
-        where: { status: 'CHANGES_REQUESTED', project: { status: 'ACTIVE' } },
-        include: { project: true, rounds: true },
-      }),
-      this.prisma.db.task.findMany({
-        where: { status: 'BLOCKED', project: { status: 'ACTIVE' } },
-        include: { project: true, assignee: true },
-      }),
-      this.prisma.db.task.findMany({
-        where: {
-          status: { notIn: ['DONE', 'BLOCKED'] },
-          isStageBlocking: true,
-          dueDate: { lt: now },
-          project: { status: 'ACTIVE' },
-          projectStage: { status: { in: ['ACTIVE', 'BLOCKED'] } },
-        },
-        include: { project: true },
-      }),
-      this.prisma.db.shoot.findMany({
-        where: { status: { not: 'CANCELLED' }, endsAt: { gte: now }, startsAt: { lte: horizon } },
-        include: { project: true },
-        orderBy: { startsAt: 'asc' },
-      }),
+        status: 'PENDING',
+        kind: 'CLIENT',
+        $or: [
+          { deliverableId: { $in: activeDeliverableIds } },
+          { projectStageId: { $in: activeStageIds } },
+        ],
+      })
+        .populate([
+          { path: 'deliverable', populate: { path: 'project' } },
+          { path: 'projectStage', populate: { path: 'project' } },
+        ])
+        .lean<
+          (Approval & {
+            deliverable: (Deliverable & { project: Project | null }) | null;
+            projectStage: (ProjectStage & { project: Project | null }) | null;
+          })[]
+        >(),
+      Deliverables.find({ status: 'CHANGES_REQUESTED', projectId: { $in: activeProjectIds } })
+        .populate([{ path: 'project' }, { path: 'rounds' }])
+        .lean<(Deliverable & { project: Project; rounds: RevisionRound[] })[]>(),
+      Tasks.find({ status: 'BLOCKED', projectId: { $in: activeProjectIds } })
+        .populate([{ path: 'project' }, { path: 'assignee' }])
+        .lean<(Task & { project: Project; assignee: TeamMember | null })[]>(),
+      Tasks.find({
+        status: { $nin: ['DONE', 'BLOCKED'] },
+        isStageBlocking: true,
+        dueDate: { $lt: now },
+        projectId: { $in: activeProjectIds },
+        projectStageId: { $in: openStageIds },
+      })
+        .populate('project')
+        .lean<(Task & { project: Project })[]>(),
+      Shoots.find({
+        status: { $ne: 'CANCELLED' },
+        endsAt: { $gte: now },
+        startsAt: { $lte: horizon },
+      })
+        .sort({ startsAt: 1 })
+        .populate('project')
+        .lean<(Shoot & { project: Project })[]>(),
       this.conflicts.all(now),
       this.team.list(),
-      this.prisma.db.lead.findMany({ where: { stage: { notIn: ['WON', 'LOST'] } } }),
-      this.prisma.db.project.findMany({
-        where: { status: 'DELIVERED' },
-        select: { dueDate: true, deliveredAt: true },
-      }),
+      Leads.find({ stage: { $nin: ['WON', 'LOST'] } }).lean<Lead[]>(),
+      Projects.find({ status: 'DELIVERED' })
+        .select({ dueDate: 1, deliveredAt: 1 })
+        .lean<Pick<Project, 'dueDate' | 'deliveredAt'>[]>(),
     ]);
 
     const summaries = projects.map((p) => toSummary(p, now));
@@ -147,16 +187,15 @@ export class InsightsService {
       stages: STAGE_KEYS,
       now,
       wip,
-      visits: allStages.map((s) => ({
-        stageKey: s.stageDefinition.key,
-        enteredAt: s.startedAt!,
-        exitedAt: s.completedAt,
-      })),
+      visits: allStages.flatMap((s) =>
+        s.stageDefinition
+          ? [{ stageKey: s.stageDefinition.key, enteredAt: s.startedAt!, exitedAt: s.completedAt }]
+          : [],
+      ),
     });
-    const defaultTemplate = await this.prisma.db.workflowTemplate.findFirst({
-      where: { isDefault: true },
-      include: { stages: true },
-    });
+    const defaultTemplate = await WorkflowTemplates.findOne({ isDefault: true })
+      .populate('stages')
+      .lean<WorkflowTemplate & { stages: StageDefinition[] }>();
     const spine = flow.stages.map((f) => {
       const inStage = summaries.filter((s) => s.status === 'ACTIVE' && s.stage?.key === f.key);
       return {
@@ -207,7 +246,8 @@ export class InsightsService {
           priority: s.priority,
         });
       }
-      const burn = s.health.deductions.find((d) => d.code === 'BUDGET_BURN');
+      // The item quotes how much of the budget is spent, so it is for callers who may see that.
+      const burn = showMoney && s.health.deductions.find((d) => d.code === 'BUDGET_BURN');
       if (burn) {
         push({
           id: `burn:${s.id}`,

@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@nova/api": "workspace:*",
     "@nova/shared": "workspace:*",
     "next": "16.4.6",
     "react": "19.3.1",
@@ -48,5 +49,8 @@
     "jsdom": "27.4.0",
     "vitest": "4.1.12",
     "dotenv": "17.4.2"
+  },
+  "engines": {
+    "node": "24.x"
   }
 }

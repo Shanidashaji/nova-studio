@@ -10,9 +10,10 @@ next-env.d.ts
 .env
 .env.*
 !.env.example
+!.env.production.example
 
-# Generated
-packages/db/src/generated/
+
+
 
 # Local database (default location is outside the repo; this guards against overrides)
 .pgdata/

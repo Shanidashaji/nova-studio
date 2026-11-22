@@ -4,7 +4,6 @@ import type {
   DetectedLanguage,
   SessionUser,
 } from '@nova/shared';
-import type { Prisma } from '@nova/db';
 
 /** What a read tool returns: a plain-language answer, structured data, and linkable entities. */
 export interface ToolResult {
@@ -22,7 +21,7 @@ export type ProposalKind = 'CREATE_TASK' | 'UPDATE_TASK' | 'ADVANCE_PROJECT' | '
 export interface ProposalDraft {
   kind: ProposalKind;
   title: string;
-  payload: Prisma.InputJsonValue;
+  payload: unknown;
   changes: { field: string; from: string | null; to: string }[];
   /** `updatedAt` of the target when proposed; a different value at confirm time means stale. */
   targetVersion?: string;

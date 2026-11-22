@@ -10,7 +10,7 @@ flowchart LR
   subgraph Web["apps/web — Next.js"]
     MW[middleware<br/>session cookie gate]
     RSC[Server components<br/>shell + auth check]
-    RW["/api/* rewrite"]
+    RW["pages/api/[...path]<br/>(API in-process)"]
   end
   subgraph API["apps/api — NestJS"]
     G[Guards<br/>session · permissions]
@@ -20,7 +20,7 @@ flowchart LR
     SSE[SSE stream]
     AS[Assistant service]
   end
-  DB[(PostgreSQL<br/>Prisma)]
+  DB[(MongoDB Atlas<br/>Mongoose · GridFS)]
   LLM[[Anthropic API<br/>optional]]
 
   UI --> MW --> RSC
@@ -30,7 +30,7 @@ flowchart LR
   AS -. if ANTHROPIC_API_KEY set .-> LLM
 ```
 
-- **Same origin.** The browser only talks to Next.js. Next rewrites `/api/*` to the NestJS server, so the session cookie is first-party, `SameSite=Lax` works, and no CORS configuration is needed.
+- **Same origin, one deployment.** The browser only talks to Next.js. A catch-all `pages/api` route hands `/api/*` to the NestJS application running in the same process (booted once per server instance), so the session cookie is first-party, `SameSite=Lax` works, no CORS configuration is needed, and the product deploys as one Vercel project (ADR-0014).
 - **One source of business rules.** Pure domain rules (workflow transition guards, health score, conflict detection, attention ranking) live in `packages/shared`. The API enforces them; the UI reuses them for instant hints. They are unit-tested once.
 - **Audit by construction.** Every state-changing service method writes its `ActivityLog` row in the same database transaction as the change.
 
@@ -41,9 +41,9 @@ Layering inside every module:
 ```
 Controller  — HTTP, auth decorators, Zod validation, DTO mapping
    ↓
-Service     — use cases, permission-aware, Prisma transaction, ActivityLog, emits domain event
+Service     — use cases, permission-aware, MongoDB transaction, ActivityLog, emits domain event
    ↓
-Prisma      — data access (PrismaService from packages/db)
+Mongoose    — data access (DatabaseService over the models in packages/db)
 ```
 
 Modules:
@@ -81,9 +81,9 @@ sequenceDiagram
   participant B as Browser
   participant N as Next.js
   participant A as NestJS
-  participant D as PostgreSQL
+  participant D as MongoDB
   B->>N: POST /api/v1/auth/login {email, password}
-  N->>A: (rewrite)
+  N->>A: (in-process handler)
   A->>D: find user by email
   A->>A: verify Argon2id hash (constant-time)
   A->>D: insert Session {tokenHash = SHA-256(token), expiresAt}
@@ -139,32 +139,31 @@ flowchart LR
 
 ## Real-time
 
-Server-Sent Events (`GET /api/v1/events`) push domain events (`task.updated`, `project.transitioned`, `approval.decided`, ...). The client maps events to query invalidations and to the live activity stream. SSE is one-directional, works through the Next rewrite, needs no extra infrastructure, and is all NOVA needs — see ADR-0006.
+Server-Sent Events (`GET /api/v1/events`) push domain events (`task.updated`, `project.transitioned`, `approval.decided`, ...). The client maps events to query invalidations and to the live activity stream. SSE is one-directional, works through the in-process API route (up to the function's 300 s limit on Vercel; `EventSource` reconnects), needs no extra infrastructure, and is all NOVA needs — see ADR-0006.
 
 ## Configuration
 
-| Variable                                  | Used by | Purpose                                                        |
-| ----------------------------------------- | ------- | -------------------------------------------------------------- |
-| `DATABASE_URL`                            | api, db | PostgreSQL connection string                                   |
-| `API_PORT`                                | api     | NestJS port (default 4000)                                     |
-| `API_INTERNAL_URL`                        | web     | Where Next rewrites `/api/*` (default `http://localhost:4000`) |
+| Variable                                  | Used by | Purpose                                                          |
+| ----------------------------------------- | ------- | ---------------------------------------------------------------- |
+| `DATABASE_URL`                            | api, db | MongoDB connection string (replica set, e.g. Atlas)              |
+| `API_PORT`                                | api     | Port when the API runs standalone (default 4000)                 |
+| `API_INTERNAL_URL`                        | web     | Optional: forward `/api/*` to a standalone API instead           |
 | `WEB_ORIGIN`                              | api     | Allowed `Origin`(s) for state-changing requests, comma-separated |
-| `SESSION_TTL_HOURS`, `SESSION_IDLE_HOURS` | api     | Session lifetime                                               |
-| `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD` | db seed | Initial admin (never committed)                                |
-| `ANTHROPIC_API_KEY`                       | api     | Optional; enables the Claude provider                          |
-| `ASSISTANT_MODEL`                         | api     | Optional model override (default `claude-opus-5-5`)            |
-| `NOVA_PG_DATA_DIR`                        | scripts | Data directory for the embedded local PostgreSQL               |
+| `SESSION_TTL_HOURS`, `SESSION_IDLE_HOURS` | api     | Session lifetime                                                 |
+| `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD` | db seed | Initial admin (never committed)                                  |
+| `ANTHROPIC_API_KEY`                       | api     | Optional; enables the Claude provider                            |
+| `ASSISTANT_MODEL`                         | api     | Optional model override (default `claude-opus-5-5`)              |
 
 Environment is validated with Zod at API start-up; the process exits with a clear message if something is missing.
 
 ## Testing strategy
 
-| Level           | Tool                     | Scope                                                                                                   |
-| --------------- | ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Unit            | Vitest                   | Domain rules in `packages/shared` (transition guards, health score, conflicts, attention ranking)       |
-| API integration | Vitest + Supertest       | Each module against a real PostgreSQL test database: auth, guards, validation, transactions, audit rows |
-| UI component    | Vitest + Testing Library | Inspector actions, palette, assistant proposal flow, panel states                                       |
-| End-to-end      | Playwright               | Login/logout, protected route redirect, the five demo journeys, mobile viewport smoke test              |
+| Level           | Tool                     | Scope                                                                                                |
+| --------------- | ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Unit            | Vitest                   | Domain rules in `packages/shared` (transition guards, health score, conflicts, attention ranking)    |
+| API integration | Vitest + Supertest       | Each module against a real MongoDB test database: auth, guards, validation, transactions, audit rows |
+| UI component    | Vitest + Testing Library | Inspector actions, palette, assistant proposal flow, panel states                                    |
+| End-to-end      | Playwright               | Login/logout, protected route redirect, the five demo journeys, mobile viewport smoke test           |
 
 ## Explicit non-goals
 

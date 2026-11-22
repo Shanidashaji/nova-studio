@@ -3,7 +3,16 @@
  * tasks and dependencies, deliverables and revision rounds, shoots and bookings, sales leads,
  * demo finances, client interactions and a back-filled activity log.
  */
-import type { PrismaClient, Prisma, StageKey, TaskStatus } from '../generated/prisma/client';
+import type { Database, Models } from '../database';
+import type {
+  ActivitySource,
+  DeliverableStatus,
+  FinanceCategory,
+  FinanceKind,
+  InteractionType,
+  StageKey,
+  TaskStatus,
+} from '../models/enums';
 import {
   ASSETS,
   CLIENTS,
@@ -106,8 +115,38 @@ const STAGE_OWNER: Record<StageKey, RoleTag | 'projectDirector' | 'projectEditor
   DELIVERY: 'producer',
 };
 
+/** A ledger row as the seed writes it (every other column comes from the schema defaults). */
+interface NewFinancialRecord {
+  projectId?: string | null;
+  kind: FinanceKind;
+  category: FinanceCategory;
+  amount: number;
+  occurredOn: Date;
+  note: string;
+}
+
+interface NewActivity {
+  createdAt: Date;
+  action: string;
+  entityType: string;
+  entityId: string;
+  projectId: string | null;
+  summary: string;
+  actorId: string | null;
+  source: ActivitySource;
+}
+
+interface NewInteraction {
+  clientId: string;
+  projectId: string;
+  type: InteractionType;
+  summary: string;
+  occurredAt: Date;
+  loggedById: string | null;
+}
+
 interface Ctx {
-  prisma: PrismaClient;
+  m: Models;
   adminId: string;
   producerUserId: string;
   member: Map<RoleTag, string>;
@@ -128,15 +167,16 @@ interface Ctx {
     }
   >;
   project: Map<string, { id: string; title: string; code: string; clientId: string }>;
-  activity: Prisma.ActivityLogCreateManyInput[];
+  activity: NewActivity[];
 }
 
 export async function buildDemoWorld(
-  prisma: PrismaClient,
+  db: Database,
   users: { adminId: string; producerUserId: string },
 ): Promise<Record<string, number>> {
+  const m = db.models;
   const ctx: Ctx = {
-    prisma,
+    m,
     ...users,
     member: new Map(),
     memberName: new Map(),
@@ -146,78 +186,82 @@ export async function buildDemoWorld(
     activity: [],
   };
 
-  // Workflow templates.
+  // Workflow templates (template first, then its stage definitions).
   for (const t of TEMPLATES) {
-    const created = await prisma.workflowTemplate.create({
-      data: {
-        name: t.name,
-        description: t.description,
-        isDefault: t.isDefault,
-        stages: {
-          create: t.stages.map((s, i) => ({
-            key: s.key,
-            label: s.label,
-            order: i + 1,
-            expectedDays: s.expectedDays,
-            requiresApproval: s.requiresApproval ?? false,
-            skippable: s.skippable ?? false,
-            exitCriteria: s.exitCriteria,
-          })),
-        },
-      },
-      include: { stages: { orderBy: { order: 'asc' } } },
+    const created = await m.WorkflowTemplate.create({
+      name: t.name,
+      description: t.description,
+      isDefault: t.isDefault,
     });
-    ctx.template.set(t.name, { id: created.id, stages: created.stages });
+    const stages = await m.StageDefinition.insertMany(
+      t.stages.map((s, i) => ({
+        templateId: created._id,
+        key: s.key,
+        label: s.label,
+        order: i + 1,
+        expectedDays: s.expectedDays,
+        requiresApproval: s.requiresApproval ?? false,
+        skippable: s.skippable ?? false,
+        exitCriteria: s.exitCriteria,
+      })),
+    );
+    ctx.template.set(t.name, {
+      id: created._id,
+      stages: stages
+        .map((s) => ({
+          id: s._id,
+          key: s.key,
+          label: s.label,
+          order: s.order,
+          expectedDays: s.expectedDays,
+          requiresApproval: s.requiresApproval,
+        }))
+        .sort((a, b) => a.order - b.order),
+    });
   }
 
   // Team. The producer account is linked to its team member.
-  for (const m of TEAM) {
-    const created = await prisma.teamMember.create({
-      data: {
-        name: m.name,
-        title: m.title,
-        skills: m.skills,
-        baseLocation: m.baseLocation,
-        weeklyCapacityHours: m.weeklyCapacityHours,
-        email: `${m.name.split(' ')[0]!.toLowerCase()}@studio.demo`,
-        userId: m.tag === 'producer' ? users.producerUserId : null,
-      },
+  for (const t of TEAM) {
+    const created = await m.TeamMember.create({
+      name: t.name,
+      title: t.title,
+      skills: t.skills,
+      baseLocation: t.baseLocation,
+      weeklyCapacityHours: t.weeklyCapacityHours,
+      email: `${t.name.split(' ')[0]!.toLowerCase()}@studio.demo`,
+      userId: t.tag === 'producer' ? users.producerUserId : null,
     });
-    ctx.member.set(m.tag, created.id);
-    ctx.memberName.set(created.id, m.name);
+    ctx.member.set(t.tag, created._id);
+    ctx.memberName.set(created._id, t.name);
   }
 
   // Clients.
   for (const c of CLIENTS) {
-    const created = await prisma.client.create({
-      data: {
-        name: c.name,
-        industry: c.industry,
-        city: c.city,
-        status: c.status,
-        contactName: c.contactName,
-        contactEmail: `${c.contactName.split(' ').at(-1)!.replace('.', '').toLowerCase()}@${c.tag}.demo`,
-        accentColor: c.accentColor,
-        notes: 'Demonstration client — fictional company.',
-      },
+    const created = await m.Client.create({
+      name: c.name,
+      industry: c.industry,
+      city: c.city,
+      status: c.status,
+      contactName: c.contactName,
+      contactEmail: `${c.contactName.split(' ').at(-1)!.replace('.', '').toLowerCase()}@${c.tag}.demo`,
+      accentColor: c.accentColor,
+      notes: 'Demonstration client — fictional company.',
     });
-    ctx.client.set(c.tag, { id: created.id, name: c.name, contactName: c.contactName });
+    ctx.client.set(c.tag, { id: created._id, name: c.name, contactName: c.contactName });
   }
 
   const assetIds = new Map<string, string>();
   for (const a of ASSETS) {
-    const created = await prisma.asset.create({
-      data: {
-        name: a.name,
-        category: a.category,
-        serialTag: `NM-${a.category.slice(0, 3)}-${a.tag.toUpperCase()}`,
-        homeLocation: a.homeLocation,
-        dailyRate: a.dailyRate,
-        status: a.maintenance ? 'MAINTENANCE' : 'AVAILABLE',
-        notes: a.maintenance ? 'Sensor recalibration at service centre (demo).' : null,
-      },
+    const created = await m.Asset.create({
+      name: a.name,
+      category: a.category,
+      serialTag: `NM-${a.category.slice(0, 3)}-${a.tag.toUpperCase()}`,
+      homeLocation: a.homeLocation,
+      dailyRate: a.dailyRate,
+      status: a.maintenance ? 'MAINTENANCE' : 'AVAILABLE',
+      notes: a.maintenance ? 'Sensor recalibration at service centre (demo).' : null,
     });
-    assetIds.set(a.tag, created.id);
+    assetIds.set(a.tag, created._id);
   }
 
   for (const p of PROJECTS) await seedProject(ctx, p);
@@ -229,30 +273,37 @@ export async function buildDemoWorld(
     const endsAt = at(s.dayOffset + s.days - 1, s.endHour);
     const status =
       s.dayOffset + s.days - 1 < 0 ? 'WRAPPED' : s.dayOffset <= 3 ? 'CONFIRMED' : 'PLANNED';
-    const shoot = await prisma.shoot.create({
-      data: {
-        projectId: project.id,
-        title: s.title,
-        location: s.location,
-        city: s.city,
+    const shoot = await m.Shoot.create({
+      projectId: project.id,
+      title: s.title,
+      location: s.location,
+      city: s.city,
+      startsAt,
+      endsAt,
+      callTime: s.callTime,
+      status,
+    });
+    await m.CrewCall.insertMany(
+      s.crew.map((c) => ({
+        shootId: shoot._id,
+        teamMemberId: ctx.member.get(c.role)!,
+        role: c.as,
+      })),
+    );
+    await m.AssetBooking.insertMany(
+      s.assets.map((tag) => ({
+        shootId: shoot._id,
+        assetId: assetIds.get(tag)!,
         startsAt,
         endsAt,
-        callTime: s.callTime,
-        status,
-        crew: {
-          create: s.crew.map((c) => ({ teamMemberId: ctx.member.get(c.role)!, role: c.as })),
-        },
-        bookings: {
-          create: s.assets.map((tag) => ({ assetId: assetIds.get(tag)!, startsAt, endsAt })),
-        },
-      },
-    });
+      })),
+    );
     log(
       ctx,
       at(Math.min(s.dayOffset, 0) - 6, 11),
       'shoot.created',
       'shoot',
-      shoot.id,
+      shoot._id,
       project.id,
       `Scheduled “${s.title}” for ${project.title}`,
     );
@@ -266,49 +317,45 @@ export async function buildDemoWorld(
     ['suite1', 'zenpods-hero', -10, 1],
   ];
   for (const [asset, projectTag, from, to] of suiteBookings) {
-    await prisma.assetBooking.create({
-      data: {
-        assetId: assetIds.get(asset)!,
-        projectId: ctx.project.get(projectTag)!.id,
-        startsAt: at(from, 9),
-        endsAt: at(to, 20),
-        note: 'Post-production',
-      },
+    await m.AssetBooking.create({
+      assetId: assetIds.get(asset)!,
+      projectId: ctx.project.get(projectTag)!.id,
+      startsAt: at(from, 9),
+      endsAt: at(to, 20),
+      note: 'Post-production',
     });
   }
 
   // Sales pipeline.
   const leadIds = new Map<string, string>();
   for (const l of LEADS) {
-    const lead = await prisma.lead.create({
-      data: {
-        title: l.title,
-        clientId: l.client ? ctx.client.get(l.client)!.id : null,
-        prospectName: l.prospectName ?? null,
-        projectType: l.projectType,
-        estimatedValue: l.estimatedValue,
-        stage: l.stage,
-        source: l.source,
-        expectedCloseDate: at(l.closeOffset),
-        convertedProjectId:
-          l.stage === 'WON' && l.client === 'vibe' ? ctx.project.get('vibe-reels')!.id : null,
-        createdAt: at(Math.min(l.closeOffset, 0) - between(10, 30)),
-      },
+    const lead = await m.Lead.create({
+      title: l.title,
+      clientId: l.client ? ctx.client.get(l.client)!.id : null,
+      prospectName: l.prospectName ?? null,
+      projectType: l.projectType,
+      estimatedValue: l.estimatedValue,
+      stage: l.stage,
+      source: l.source,
+      expectedCloseDate: at(l.closeOffset),
+      convertedProjectId:
+        l.stage === 'WON' && l.client === 'vibe' ? ctx.project.get('vibe-reels')!.id : null,
+      createdAt: at(Math.min(l.closeOffset, 0) - between(10, 30)),
     });
-    leadIds.set(l.title, lead.id);
+    leadIds.set(l.title, lead._id);
     log(
       ctx,
       at(Math.min(l.closeOffset, 0) - between(1, 8), 15),
       'lead.updated',
       'lead',
-      lead.id,
+      lead._id,
       null,
       `Lead “${l.title}” moved to ${l.stage.toLowerCase()}`,
     );
   }
 
   // Studio-level demo finances: six months of overheads and income from earlier engagements.
-  const finance: Prisma.FinancialRecordCreateManyInput[] = [];
+  const finance: NewFinancialRecord[] = [];
   for (let month = 5; month >= 0; month--) {
     const d = new Date(TODAY.getFullYear(), TODAY.getMonth() - month, 3);
     for (const o of MONTHLY_OVERHEADS) {
@@ -330,64 +377,62 @@ export async function buildDemoWorld(
       });
     }
   }
-  await prisma.financialRecord.createMany({ data: finance });
+  await m.FinancialRecord.insertMany(finance);
 
   // Notifications for the administrator.
   const aurora = ctx.project.get('aurora-film')!;
   const zenHero = ctx.project.get('zenpods-hero')!;
   const zenReels = ctx.project.get('zenpods-reels')!;
-  await prisma.notification.createMany({
-    data: [
-      {
-        userId: users.adminId,
-        kind: 'approval.waiting',
-        title: 'Client approval waiting 4 days',
-        body: `${zenHero.title} — Hero product film v2`,
-        entityType: 'project',
-        entityId: zenHero.id,
-        createdAt: at(-1, 9),
-      },
-      {
-        userId: users.adminId,
-        kind: 'task.blocked',
-        title: 'Colour grade blocked',
-        body: `${aurora.title} — waiting on sky replacement`,
-        entityType: 'project',
-        entityId: aurora.id,
-        createdAt: at(-1, 17),
-      },
-      {
-        userId: users.adminId,
-        kind: 'project.overdue',
-        title: 'Project overdue',
-        body: `${zenReels.title} passed its due date`,
-        entityType: 'project',
-        entityId: zenReels.id,
-        createdAt: at(0, 8),
-      },
-      {
-        userId: users.adminId,
-        kind: 'booking.conflict',
-        title: 'Equipment double-booked',
-        body: 'Sony FX6 — A-cam is booked by two shoots in 3 days',
-        entityType: 'asset',
-        entityId: assetIds.get('fx6-a')!,
-        createdAt: at(0, 8, 30),
-      },
-      {
-        userId: users.adminId,
-        kind: 'lead.update',
-        title: 'Lead in negotiation',
-        body: 'Resort aerial showcase — decision expected this week',
-        entityType: 'lead',
-        entityId: leadIds.get('Resort aerial showcase')!,
-        readAt: at(-2, 10),
-        createdAt: at(-2, 9),
-      },
-    ],
-  });
+  await m.Notification.insertMany([
+    {
+      userId: users.adminId,
+      kind: 'approval.waiting',
+      title: 'Client approval waiting 4 days',
+      body: `${zenHero.title} — Hero product film v2`,
+      entityType: 'project',
+      entityId: zenHero.id,
+      createdAt: at(-1, 9),
+    },
+    {
+      userId: users.adminId,
+      kind: 'task.blocked',
+      title: 'Colour grade blocked',
+      body: `${aurora.title} — waiting on sky replacement`,
+      entityType: 'project',
+      entityId: aurora.id,
+      createdAt: at(-1, 17),
+    },
+    {
+      userId: users.adminId,
+      kind: 'project.overdue',
+      title: 'Project overdue',
+      body: `${zenReels.title} passed its due date`,
+      entityType: 'project',
+      entityId: zenReels.id,
+      createdAt: at(0, 8),
+    },
+    {
+      userId: users.adminId,
+      kind: 'booking.conflict',
+      title: 'Equipment double-booked',
+      body: 'Sony FX6 — A-cam is booked by two shoots in 3 days',
+      entityType: 'asset',
+      entityId: assetIds.get('fx6-a')!,
+      createdAt: at(0, 8, 30),
+    },
+    {
+      userId: users.adminId,
+      kind: 'lead.update',
+      title: 'Lead in negotiation',
+      body: 'Resort aerial showcase — decision expected this week',
+      entityType: 'lead',
+      entityId: leadIds.get('Resort aerial showcase')!,
+      readAt: at(-2, 10),
+      createdAt: at(-2, 9),
+    },
+  ]);
 
-  await prisma.activityLog.createMany({ data: ctx.activity });
+  await m.ActivityLog.insertMany(ctx.activity);
 
   const [
     projects,
@@ -400,15 +445,15 @@ export async function buildDemoWorld(
     records,
     activity,
   ] = await Promise.all([
-    prisma.project.count(),
-    prisma.task.count(),
-    prisma.deliverable.count(),
-    prisma.shoot.count(),
-    prisma.assetBooking.count(),
-    prisma.approval.count(),
-    prisma.clientInteraction.count(),
-    prisma.financialRecord.count(),
-    prisma.activityLog.count(),
+    m.Project.countDocuments(),
+    m.Task.countDocuments(),
+    m.Deliverable.countDocuments(),
+    m.Shoot.countDocuments(),
+    m.AssetBooking.countDocuments(),
+    m.Approval.countDocuments(),
+    m.ClientInteraction.countDocuments(),
+    m.FinancialRecord.countDocuments(),
+    m.ActivityLog.countDocuments(),
   ]);
   return {
     team: TEAM.length,
@@ -430,7 +475,7 @@ export async function buildDemoWorld(
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 async function seedProject(ctx: Ctx, p: ProjectFixture) {
-  const { prisma } = ctx;
+  const { m } = ctx;
   const template = ctx.template.get(p.template)!;
   const client = ctx.client.get(p.client)!;
   const delivered = p.status === 'DELIVERED';
@@ -439,36 +484,36 @@ async function seedProject(ctx: Ctx, p: ProjectFixture) {
       role === 'projectDirector' ? p.director : role === 'projectEditor' ? p.editor : role,
     )!;
 
-  const project = await prisma.project.create({
-    data: {
-      code: p.code,
-      title: p.title,
-      logline: p.logline,
-      clientId: client.id,
-      type: p.type,
-      workflowTemplateId: template.id,
-      status: p.status,
-      priority: p.priority,
-      location: p.location,
-      startDate: at(p.startOffset),
-      dueDate: at(p.dueOffset, 18),
-      deliveredAt: delivered ? at(p.dueOffset - 1, 17) : null,
-      budget: p.budget,
-      includedRevisions: p.includedRevisions,
-      coverImageUrl: null,
-      aiAssisted: p.aiAssisted,
-      createdAt: at(p.startOffset - 2),
-      members: { create: projectMembers(ctx, p) },
-    },
+  const project = await m.Project.create({
+    code: p.code,
+    title: p.title,
+    logline: p.logline,
+    clientId: client.id,
+    type: p.type,
+    workflowTemplateId: template.id,
+    status: p.status,
+    priority: p.priority,
+    location: p.location,
+    startDate: at(p.startOffset),
+    dueDate: at(p.dueOffset, 18),
+    deliveredAt: delivered ? at(p.dueOffset - 1, 17) : null,
+    budget: p.budget,
+    includedRevisions: p.includedRevisions,
+    coverImageUrl: null,
+    aiAssisted: p.aiAssisted,
+    createdAt: at(p.startOffset - 2),
   });
-  ctx.project.set(p.tag, { id: project.id, title: p.title, code: p.code, clientId: client.id });
+  await m.ProjectMember.insertMany(
+    projectMembers(ctx, p).map((member) => ({ ...member, projectId: project._id })),
+  );
+  ctx.project.set(p.tag, { id: project._id, title: p.title, code: p.code, clientId: client.id });
   log(
     ctx,
     at(p.startOffset, 10),
     'project.created',
     'project',
-    project.id,
-    project.id,
+    project._id,
+    project._id,
     `Opened ${p.code} “${p.title}” for ${client.name}`,
     ctx.adminId,
   );
@@ -514,77 +559,69 @@ async function seedProject(ctx: Ctx, p: ProjectFixture) {
         : i === currentIdx
           ? 'ACTIVE'
           : 'PENDING';
-    const ps = await prisma.projectStage.create({
-      data: {
-        projectId: project.id,
-        stageDefinitionId: s.id,
-        status,
-        ownerId: roleId(STAGE_OWNER[s.key]),
-        startedAt: w && status !== 'PENDING' ? atFraction(w.start) : null,
-        completedAt: w && status === 'DONE' ? atFraction(w.end) : null,
-      },
+    const ps = await m.ProjectStage.create({
+      projectId: project._id,
+      stageDefinitionId: s.id,
+      status,
+      ownerId: roleId(STAGE_OWNER[s.key]),
+      startedAt: w && status !== 'PENDING' ? atFraction(w.start) : null,
+      completedAt: w && status === 'DONE' ? atFraction(w.end) : null,
     });
-    projectStageIds.set(s.key, ps.id);
+    projectStageIds.set(s.key, ps._id);
 
     if (status === 'DONE' || status === 'ACTIVE') {
       const when = atFraction(w!.start);
-      await prisma.stageTransition.create({
-        data: {
-          projectId: project.id,
-          fromStageId: previousStageId,
-          toStageId: ps.id,
-          direction: 'FORWARD',
-          actorId: ctx.producerUserId,
-          source: 'UI',
-          reason: previousStageId ? null : 'Project kicked off',
-          createdAt: when,
-        },
+      await m.StageTransition.create({
+        projectId: project._id,
+        fromStageId: previousStageId,
+        toStageId: ps._id,
+        direction: 'FORWARD',
+        actorId: ctx.producerUserId,
+        source: 'UI',
+        reason: previousStageId ? null : 'Project kicked off',
+        createdAt: when,
       });
       log(
         ctx,
         when,
         'project.transitioned',
         'project',
-        project.id,
-        project.id,
+        project._id,
+        project._id,
         previousStageId ? `${p.title} moved to ${s.label}` : `${p.title} started in ${s.label}`,
         ctx.producerUserId,
       );
-      previousStageId = ps.id;
+      previousStageId = ps._id;
     }
     if (status === 'DONE' && s.requiresApproval) {
-      await prisma.approval.create({
-        data: {
-          kind: 'CLIENT',
-          status: 'APPROVED',
-          projectStageId: ps.id,
-          title: `${s.label} sign-off`,
-          requestedAt: atFraction(w!.end - 1),
-          decidedAt: atFraction(w!.end),
-          decidedBy: client.contactName,
-        },
+      await m.Approval.create({
+        kind: 'CLIENT',
+        status: 'APPROVED',
+        projectStageId: ps._id,
+        title: `${s.label} sign-off`,
+        requestedAt: atFraction(w!.end - 1),
+        decidedAt: atFraction(w!.end),
+        decidedBy: client.contactName,
       });
     }
   }
   if (delivered && previousStageId) {
-    await prisma.stageTransition.create({
-      data: {
-        projectId: project.id,
-        fromStageId: previousStageId,
-        toStageId: null,
-        direction: 'FORWARD',
-        actorId: ctx.producerUserId,
-        reason: 'Delivered to client',
-        createdAt: at(p.dueOffset - 1, 17),
-      },
+    await m.StageTransition.create({
+      projectId: project._id,
+      fromStageId: previousStageId,
+      toStageId: null,
+      direction: 'FORWARD',
+      actorId: ctx.producerUserId,
+      reason: 'Delivered to client',
+      createdAt: at(p.dueOffset - 1, 17),
     });
     log(
       ctx,
       at(p.dueOffset - 1, 17),
       'project.delivered',
       'project',
-      project.id,
-      project.id,
+      project._id,
+      project._id,
       `${p.title} delivered to ${client.name}`,
       ctx.producerUserId,
     );
@@ -621,28 +658,24 @@ async function seedProject(ctx: Ctx, p: ProjectFixture) {
         status = 'TODO';
       if (p.tag === 'zenpods-hero' && t.title === 'Consolidate client feedback') status = 'TODO';
 
-      const task = await prisma.task.create({
-        data: {
-          projectId: project.id,
-          projectStageId: projectStageIds.get(s.key)!,
-          title: t.title,
-          assigneeId: roleId(t.role),
-          status,
-          blockedReason,
-          priority: t.blocking ? (p.priority === 'URGENT' ? 'URGENT' : 'HIGH') : 'MEDIUM',
-          dueDate: atFraction(due, 18),
-          estimateHours: Math.max(1, Math.round(t.hours * sizeFactor)),
-          isStageBlocking: t.blocking,
-          completedAt: status === 'DONE' ? atFraction(Math.min(due, -0.2)) : null,
-          createdAt: atFraction(w.start),
-        },
+      const task = await m.Task.create({
+        projectId: project._id,
+        projectStageId: projectStageIds.get(s.key)!,
+        title: t.title,
+        assigneeId: roleId(t.role),
+        status,
+        blockedReason,
+        priority: t.blocking ? (p.priority === 'URGENT' ? 'URGENT' : 'HIGH') : 'MEDIUM',
+        dueDate: atFraction(due, 18),
+        estimateHours: Math.max(1, Math.round(t.hours * sizeFactor)),
+        isStageBlocking: t.blocking,
+        completedAt: status === 'DONE' ? atFraction(Math.min(due, -0.2)) : null,
+        createdAt: atFraction(w.start),
       });
-      created.push(task.id);
-      taskIds.push({ id: task.id, key: s.key, title: t.title });
+      created.push(task._id);
+      taskIds.push({ id: task._id, key: s.key, title: t.title });
       if (t.after !== undefined) {
-        await prisma.taskDependency.create({
-          data: { taskId: task.id, dependsOnId: created[t.after]! },
-        });
+        await m.TaskDependency.create({ taskId: task._id, dependsOnId: created[t.after]! });
       }
       if (status === 'DONE') {
         log(
@@ -650,8 +683,8 @@ async function seedProject(ctx: Ctx, p: ProjectFixture) {
           atFraction(Math.min(due, -0.2)),
           'task.completed',
           'task',
-          task.id,
-          project.id,
+          task._id,
+          project._id,
           `${ctx.memberName.get(roleId(t.role))} completed “${t.title}” on ${p.title}`,
           ctx.producerUserId,
         );
@@ -661,81 +694,74 @@ async function seedProject(ctx: Ctx, p: ProjectFixture) {
 
   if (p.tag === 'aurora-film') {
     const grade = taskIds.find((t) => t.title === 'Colour grade')!;
-    const vfx = await prisma.task.create({
-      data: {
-        projectId: project.id,
-        projectStageId: projectStageIds.get('EDIT')!,
-        title: 'Sky replacement and clean-up (AI-assisted)',
-        description: 'Replace overcast skies in the loom-yard scenes; remove modern signage.',
-        assigneeId: ctx.member.get('ai')!,
-        status: 'IN_PROGRESS',
-        priority: 'HIGH',
-        dueDate: at(-1, 18),
-        estimateHours: 12,
-        isStageBlocking: true,
-        createdAt: at(-6),
-      },
+    const vfx = await m.Task.create({
+      projectId: project._id,
+      projectStageId: projectStageIds.get('EDIT')!,
+      title: 'Sky replacement and clean-up (AI-assisted)',
+      description: 'Replace overcast skies in the loom-yard scenes; remove modern signage.',
+      assigneeId: ctx.member.get('ai')!,
+      status: 'IN_PROGRESS',
+      priority: 'HIGH',
+      dueDate: at(-1, 18),
+      estimateHours: 12,
+      isStageBlocking: true,
+      createdAt: at(-6),
     });
-    await prisma.taskDependency.create({ data: { taskId: grade.id, dependsOnId: vfx.id } });
+    await m.TaskDependency.create({ taskId: grade.id, dependsOnId: vfx._id });
     log(
       ctx,
       at(-1, 17, 40),
       'task.blocked',
       'task',
       grade.id,
-      project.id,
+      project._id,
       'Colour grade on Woven Light marked blocked — waiting on sky replacement',
       ctx.producerUserId,
     );
   }
   if (p.tag === 'zenpods-reels') {
-    await prisma.task.create({
-      data: {
-        projectId: project.id,
-        projectStageId: projectStageIds.get('REVIEW')!,
-        title: 'Updated price card graphics',
-        description: 'Round 3 feedback: replace the old price card in all four reels.',
-        assigneeId: ctx.member.get('motion')!,
-        status: 'BLOCKED',
-        blockedReason: 'Waiting on the client’s new price card artwork.',
-        priority: 'URGENT',
-        dueDate: at(0, 18),
-        estimateHours: 3,
-        isStageBlocking: true,
-        createdAt: at(-1, 13),
-      },
+    await m.Task.create({
+      projectId: project._id,
+      projectStageId: projectStageIds.get('REVIEW')!,
+      title: 'Updated price card graphics',
+      description: 'Round 3 feedback: replace the old price card in all four reels.',
+      assigneeId: ctx.member.get('motion')!,
+      status: 'BLOCKED',
+      blockedReason: 'Waiting on the client’s new price card artwork.',
+      priority: 'URGENT',
+      dueDate: at(0, 18),
+      estimateHours: 3,
+      isStageBlocking: true,
+      createdAt: at(-1, 13),
     });
   }
   if (p.aiAssisted && p.tag !== 'neotech-demo') {
     const pre = projectStageIds.get('PRE_PRODUCTION')!;
     const preIdx = stages.findIndex((s) => s.key === 'PRE_PRODUCTION');
-    await prisma.task.create({
-      data: {
-        projectId: project.id,
-        projectStageId: pre,
-        title: 'AI-assisted previs frames',
-        description:
-          'Generate style frames and an animatic to align the client on look and pacing.',
-        assigneeId: ctx.member.get('ai')!,
-        status: preIdx < currentIdx ? 'DONE' : preIdx === currentIdx ? 'IN_PROGRESS' : 'TODO',
-        priority: 'MEDIUM',
-        estimateHours: 8,
-        dueDate: atFraction(windows.get(stages[preIdx]!.id)!.end, 18),
-        completedAt: preIdx < currentIdx ? atFraction(windows.get(stages[preIdx]!.id)!.end) : null,
-      },
+    await m.Task.create({
+      projectId: project._id,
+      projectStageId: pre,
+      title: 'AI-assisted previs frames',
+      description: 'Generate style frames and an animatic to align the client on look and pacing.',
+      assigneeId: ctx.member.get('ai')!,
+      status: preIdx < currentIdx ? 'DONE' : preIdx === currentIdx ? 'IN_PROGRESS' : 'TODO',
+      priority: 'MEDIUM',
+      estimateHours: 8,
+      dueDate: atFraction(windows.get(stages[preIdx]!.id)!.end, 18),
+      completedAt: preIdx < currentIdx ? atFraction(windows.get(stages[preIdx]!.id)!.end) : null,
     });
   }
 
   await seedDeliverables(
     ctx,
     p,
-    project.id,
+    project._id,
     projectStageIds.get('REVIEW') ?? null,
     currentIdx,
     stages,
   );
-  await seedFinance(ctx, p, project.id, stages, currentIdx, windows);
-  await seedInteractions(ctx, p, project.id, client);
+  await seedFinance(ctx, p, project._id, stages, currentIdx, windows);
+  await seedInteractions(ctx, p, project._id, client);
 }
 
 async function seedDeliverables(
@@ -746,13 +772,13 @@ async function seedDeliverables(
   currentIdx: number,
   stages: { key: StageKey }[],
 ) {
-  const { prisma } = ctx;
+  const { m } = ctx;
   const stageIdx = (k: StageKey) => stages.findIndex((s) => s.key === k);
   const specs = DELIVERABLES[p.type] ?? DELIVERABLES.BRAND_FILM!;
   const contact = ctx.client.get(p.client)!.contactName;
 
   for (const [i, d] of specs.entries()) {
-    let status: Prisma.DeliverableCreateInput['status'] = 'PLANNED';
+    let status: DeliverableStatus = 'PLANNED';
     let version = 0;
     if (p.status === 'DELIVERED') [status, version] = ['DELIVERED', 2];
     else if (currentIdx > stageIdx('REVIEW')) [status, version] = ['APPROVED', 2];
@@ -762,15 +788,13 @@ async function seedDeliverables(
     if (p.tag === 'zenpods-hero') version = i === 0 ? 2 : 1;
     if (p.tag === 'zenpods-reels') [status, version] = ['CHANGES_REQUESTED', 3];
 
-    const deliverable = await prisma.deliverable.create({
-      data: {
-        projectId,
-        ...d,
-        status,
-        currentVersion: version,
-        dueDate: at(p.dueOffset, 18),
-        previewImageUrl: null,
-      },
+    const deliverable = await m.Deliverable.create({
+      projectId,
+      ...d,
+      status,
+      currentVersion: version,
+      dueDate: at(p.dueOffset, 18),
+      previewImageUrl: null,
     });
 
     // Revision rounds and feedback.
@@ -778,14 +802,12 @@ async function seedDeliverables(
       const sentOffset = p.tag === 'zenpods-hero' && round === 2 ? -4 : -10 + round * 3;
       const isLatest = round === version;
       const open = isLatest && (status === 'IN_REVIEW' || status === 'CHANGES_REQUESTED');
-      const rr = await prisma.revisionRound.create({
-        data: {
-          deliverableId: deliverable.id,
-          number: round,
-          sentAt: at(sentOffset, 16),
-          closedAt: open ? null : at(sentOffset + 2, 12),
-          includedInScope: round <= p.includedRevisions,
-        },
+      const rr = await m.RevisionRound.create({
+        deliverableId: deliverable._id,
+        number: round,
+        sentAt: at(sentOffset, 16),
+        closedAt: open ? null : at(sentOffset + 2, 12),
+        includedInScope: round <= p.includedRevisions,
       });
       const notes =
         p.tag === 'zenpods-reels' && isLatest
@@ -804,92 +826,82 @@ async function seedDeliverables(
                 ['00:00:21:03', 'Product colour looks slightly warm here.', 'RESOLVED'],
               ];
       for (const [timecode, body, fstatus] of notes) {
-        await prisma.feedbackItem.create({
-          data: {
-            revisionRoundId: rr.id,
-            timecode,
-            body: body!,
-            author: contact,
-            status: fstatus as 'OPEN' | 'RESOLVED',
-            createdAt: at(sentOffset + 1, 11),
-          },
+        await m.FeedbackItem.create({
+          revisionRoundId: rr._id,
+          timecode,
+          body: body!,
+          author: contact,
+          status: fstatus as 'OPEN' | 'RESOLVED',
+          createdAt: at(sentOffset + 1, 11),
         });
       }
     }
 
     // Approvals on deliverables in review.
     if (p.tag === 'zenpods-hero' && i === 0) {
-      await prisma.approval.create({
-        data: {
-          kind: 'CLIENT',
-          status: 'PENDING',
-          deliverableId: deliverable.id,
-          projectStageId: reviewStageId,
-          title: 'Client approval — Hero product film v2',
-          requestedAt: at(-4, 16),
-        },
+      await m.Approval.create({
+        kind: 'CLIENT',
+        status: 'PENDING',
+        deliverableId: deliverable._id,
+        projectStageId: reviewStageId,
+        title: 'Client approval — Hero product film v2',
+        requestedAt: at(-4, 16),
       });
       log(
         ctx,
         at(-4, 16),
         'approval.requested',
         'deliverable',
-        deliverable.id,
+        deliverable._id,
         projectId,
         `Sent ${d.name} v2 to ${contact} for approval`,
         ctx.producerUserId,
       );
     } else if (p.tag === 'zenpods-reels' && i === 0) {
-      await prisma.approval.create({
-        data: {
-          kind: 'CLIENT',
-          status: 'CHANGES_REQUESTED',
-          deliverableId: deliverable.id,
-          projectStageId: reviewStageId,
-          title: 'Client approval — reel pack v3',
-          requestedAt: at(-3, 15),
-          decidedAt: at(-1, 12),
-          decidedBy: contact,
-          note: 'Logo timing and price card need changes.',
-        },
+      await m.Approval.create({
+        kind: 'CLIENT',
+        status: 'CHANGES_REQUESTED',
+        deliverableId: deliverable._id,
+        projectStageId: reviewStageId,
+        title: 'Client approval — reel pack v3',
+        requestedAt: at(-3, 15),
+        decidedAt: at(-1, 12),
+        decidedBy: contact,
+        note: 'Logo timing and price card need changes.',
       });
       log(
         ctx,
         at(-1, 12),
         'approval.decided',
         'deliverable',
-        deliverable.id,
+        deliverable._id,
         projectId,
         `${contact} requested changes on Unboxing Reels (round 3 — beyond included revisions)`,
         null,
       );
     } else if (status === 'APPROVED' || status === 'DELIVERED') {
-      await prisma.approval.create({
-        data: {
-          kind: 'CLIENT',
-          status: 'APPROVED',
-          deliverableId: deliverable.id,
-          title: `Client approval — ${d.name}`,
-          requestedAt: at(p.dueOffset - 5, 15),
-          decidedAt: at(p.dueOffset - 3, 11),
-          decidedBy: contact,
-        },
+      await m.Approval.create({
+        kind: 'CLIENT',
+        status: 'APPROVED',
+        deliverableId: deliverable._id,
+        title: `Client approval — ${d.name}`,
+        requestedAt: at(p.dueOffset - 5, 15),
+        decidedAt: at(p.dueOffset - 3, 11),
+        decidedBy: contact,
       });
     }
   }
 
   // Stage-level approval for projects already past Review.
   if (reviewStageId && currentIdx > stageIdx('REVIEW')) {
-    await prisma.approval.create({
-      data: {
-        kind: 'CLIENT',
-        status: 'APPROVED',
-        projectStageId: reviewStageId,
-        title: 'Final cut sign-off',
-        requestedAt: at(p.dueOffset - 5, 15),
-        decidedAt: at(p.dueOffset - 3, 11),
-        decidedBy: contact,
-      },
+    await m.Approval.create({
+      kind: 'CLIENT',
+      status: 'APPROVED',
+      projectStageId: reviewStageId,
+      title: 'Final cut sign-off',
+      requestedAt: at(p.dueOffset - 5, 15),
+      decidedAt: at(p.dueOffset - 3, 11),
+      decidedBy: contact,
     });
   }
 }
@@ -902,10 +914,10 @@ async function seedFinance(
   currentIdx: number,
   windows: Map<string, { start: number; end: number }>,
 ) {
-  const records: Prisma.FinancialRecordCreateManyInput[] = [];
+  const records: NewFinancialRecord[] = [];
   const add = (
     kind: 'INCOME' | 'EXPENSE',
-    category: Prisma.FinancialRecordCreateManyInput['category'],
+    category: FinanceCategory,
     amount: number,
     offset: number,
     note: string,
@@ -937,7 +949,7 @@ async function seedFinance(
   const progress = Math.min(1, (currentIdx + p.stageProgress) / stages.length);
   const burnFactor = p.tag === 'aurora-film' ? 2.2 : 0.92;
   const spend = p.budget * 0.62 * progress * burnFactor;
-  const split: [Prisma.FinancialRecordCreateManyInput['category'], number, string][] = [
+  const split: [FinanceCategory, number, string][] = [
     ['CREW', 0.45, 'Freelance crew and talent'],
     ['EQUIPMENT_RENTAL', 0.2, 'Additional rentals'],
     ['LOCATION', 0.2, 'Location fees and permits'],
@@ -953,7 +965,7 @@ async function seedFinance(
       note,
     );
   }
-  await ctx.prisma.financialRecord.createMany({ data: records });
+  await ctx.m.FinancialRecord.insertMany(records);
 }
 
 async function seedInteractions(
@@ -962,7 +974,7 @@ async function seedInteractions(
   projectId: string,
   client: { id: string; name: string; contactName: string },
 ) {
-  const items: Prisma.ClientInteractionCreateManyInput[] = [
+  const items: NewInteraction[] = [
     {
       clientId: client.id,
       projectId,
@@ -1010,11 +1022,11 @@ async function seedInteractions(
       loggedById: ctx.adminId,
     });
   }
-  await ctx.prisma.clientInteraction.createMany({ data: items });
+  await ctx.m.ClientInteraction.insertMany(items);
   for (const i of items) {
     log(
       ctx,
-      i.occurredAt as Date,
+      i.occurredAt,
       'client.interaction',
       'client',
       client.id,

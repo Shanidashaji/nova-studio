@@ -8,22 +8,23 @@ import {
   type TaskView,
   type UpdateTask,
 } from '@nova/shared';
+import type { Project, ProjectStage, Task, TaskDependency, TeamMember } from '@nova/db';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
-import { toTaskView } from '../projects/project.mapper';
-
-const taskInclude = { assignee: true, dependsOn: { select: { dependsOnId: true } } } as const;
+import { taskViewPopulate, toTaskView, type TaskViewRow } from '../projects/project.mapper';
 
 @Injectable()
 export class TasksService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
   async get(id: string): Promise<TaskView> {
-    const task = await this.prisma.db.task.findUnique({ where: { id }, include: taskInclude });
+    const task = await this.database.models.Task.findById(id)
+      .populate(taskViewPopulate)
+      .lean<TaskViewRow>();
     if (!task) throw notFound('Task');
     return toTaskView(task);
   }
@@ -33,41 +34,44 @@ export class TasksService {
     user: SessionUser,
     source: 'UI' | 'ASSISTANT' = 'UI',
   ): Promise<TaskView> {
-    const project = await this.prisma.db.project.findUnique({
-      where: { id: input.projectId },
-      include: {
-        stages: { where: { status: { in: ['ACTIVE', 'BLOCKED'] } }, select: { id: true } },
-      },
-    });
+    const { Project, ProjectStage, TeamMember, Task } = this.database.models;
+    const project = await Project.findById(input.projectId)
+      .populate({
+        path: 'stages',
+        match: { status: { $in: ['ACTIVE', 'BLOCKED'] } },
+        select: { projectId: 1 },
+      })
+      .lean<Project & { stages: Pick<ProjectStage, '_id' | 'id' | 'projectId'>[] }>();
     if (!project) throw unprocessable('INVALID_PROJECT', 'Choose an existing project.');
     const stageId = input.projectStageId ?? project.stages[0]?.id;
     if (input.projectStageId) {
-      const stage = await this.prisma.db.projectStage.findFirst({
-        where: { id: input.projectStageId, projectId: project.id },
-      });
+      const stage = await ProjectStage.findOne({
+        _id: input.projectStageId,
+        projectId: project.id,
+      }).lean();
       if (!stage)
         throw unprocessable('INVALID_STAGE', 'The stage does not belong to this project.');
     }
     const assignee = input.assigneeId
-      ? await this.prisma.db.teamMember.findUnique({ where: { id: input.assigneeId } })
+      ? await TeamMember.findById(input.assigneeId).lean<TeamMember>()
       : null;
     if (input.assigneeId && !assignee)
       throw unprocessable('INVALID_MEMBER', 'Choose an existing team member.');
     if (assignee && !assignee.isActive)
       throw unprocessable('MEMBER_INACTIVE', `${assignee.name} is no longer on the team.`);
     if (input.parentId) {
-      const parent = await this.prisma.db.task.findUnique({ where: { id: input.parentId } });
+      const parent = await Task.findById(input.parentId).lean<Task>();
       if (!parent || parent.projectId !== project.id)
         throw unprocessable('INVALID_PARENT', 'The parent task must be in the same project.');
       if (parent.parentId)
         throw unprocessable('NESTED_SUBTASK', 'Subtasks cannot have their own subtasks.');
     }
 
-    const { task, row } = await this.prisma.db.$transaction(async (tx) => {
-      const task = await tx.task.create({
-        data: { ...input, projectStageId: stageId ?? null },
-      });
-      const row = await this.activity.record(tx, {
+    const { task, row } = await this.database.transaction(async () => {
+      const task = (
+        await Task.create({ ...input, projectStageId: stageId ?? null })
+      ).toObject<Task>();
+      const row = await this.activity.record({
         actorId: user.id,
         source,
         action: 'task.created',
@@ -88,14 +92,20 @@ export class TasksService {
     user: SessionUser,
     source: 'UI' | 'ASSISTANT' = 'UI',
   ): Promise<TaskView> {
-    const before = await this.prisma.db.task.findUnique({
-      where: { id },
-      include: {
-        project: { select: { title: true } },
-        assignee: true,
-        dependsOn: { include: { dependsOn: true } },
-      },
-    });
+    const { Task, TeamMember } = this.database.models;
+    const before = await Task.findById(id)
+      .populate([
+        { path: 'project', select: { title: 1 } },
+        { path: 'assignee' },
+        { path: 'dependsOn', populate: { path: 'dependsOn' } },
+      ])
+      .lean<
+        Task & {
+          project: Pick<Project, '_id' | 'id' | 'title'>;
+          assignee: TeamMember | null;
+          dependsOn: (TaskDependency & { dependsOn: Task })[];
+        }
+      >();
     if (!before) throw notFound('Task');
 
     // A task cannot start while work it depends on is unfinished.
@@ -110,9 +120,7 @@ export class TasksService {
       }
     }
     if (input.assigneeId) {
-      const member = await this.prisma.db.teamMember.findUnique({
-        where: { id: input.assigneeId },
-      });
+      const member = await TeamMember.findById(input.assigneeId).lean();
       if (!member) throw unprocessable('INVALID_MEMBER', 'Choose an existing team member.');
     }
 
@@ -123,8 +131,11 @@ export class TasksService {
       ...(statusChanged && input.status !== 'BLOCKED' ? { blockedReason: null } : {}),
     };
 
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const after = await tx.task.update({ where: { id }, data, include: { assignee: true } });
+    const row = await this.database.transaction(async () => {
+      const after = await Task.findByIdAndUpdate(id, { $set: data }, { new: true })
+        .populate('assignee')
+        .lean<Task & { assignee: TeamMember | null }>();
+      if (!after) throw notFound('Task');
       const parts: string[] = [];
       if (statusChanged)
         parts.push(`moved “${before.title}” to ${TASK_STATUS_LABELS[input.status!].toLowerCase()}`);
@@ -136,7 +147,7 @@ export class TasksService {
         );
       }
       if (parts.length === 0) parts.push(`updated “${before.title}”`);
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         source,
         action: statusChanged
@@ -156,21 +167,28 @@ export class TasksService {
   }
 
   async remove(id: string, user: SessionUser): Promise<void> {
-    const task = await this.prisma.db.task.findUnique({
-      where: { id },
-      include: {
-        project: { select: { title: true } },
-        subtasks: { select: { title: true } },
-      },
-    });
+    const task = await this.database.models.Task.findById(id)
+      .populate([
+        { path: 'project', select: { title: 1 } },
+        { path: 'subtasks', select: { title: 1, parentId: 1 } },
+      ])
+      .lean<
+        Task & {
+          project: Pick<Project, '_id' | 'id' | 'title'>;
+          subtasks: Pick<Task, '_id' | 'id' | 'title' | 'parentId'>[];
+        }
+      >();
     if (!task) throw notFound('Task');
-    // Subtasks are deleted with their parent (database cascade); the audit trail must say so.
+    // Subtasks are deleted with their parent (cascade, as the former foreign key did); the
+    // audit trail must say so.
     const subtasks = task.subtasks.length
       ? ` and its ${task.subtasks.length} subtask${task.subtasks.length > 1 ? 's' : ''}`
       : '';
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.task.delete({ where: { id } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      // Cascades to subtasks and to dependency edges in both directions.
+      const deleted = await this.database.deleteCascade('Task', { _id: id });
+      if (deleted === 0) throw notFound('Task');
+      return this.activity.record({
         actorId: user.id,
         action: 'task.deleted',
         entityType: 'task',
@@ -186,27 +204,29 @@ export class TasksService {
   }
 
   async addDependency(id: string, input: AddDependency, user: SessionUser): Promise<TaskView> {
+    const { Task, TaskDependency } = this.database.models;
     const [task, dependsOn] = await Promise.all([
-      this.prisma.db.task.findUnique({ where: { id } }),
-      this.prisma.db.task.findUnique({ where: { id: input.dependsOnId } }),
+      Task.findById(id).lean<Task>(),
+      Task.findById(input.dependsOnId).lean<Task>(),
     ]);
     if (!task || !dependsOn) throw notFound('Task');
     if (task.projectId !== dependsOn.projectId) {
       throw unprocessable('CROSS_PROJECT', 'Dependencies must be within the same project.');
     }
-    const edges = await this.prisma.db.taskDependency.findMany({
-      where: { task: { projectId: task.projectId } },
-      select: { taskId: true, dependsOnId: true },
-    });
+    const projectTaskIds = await Task.distinct('_id', { projectId: task.projectId });
+    const edges = await TaskDependency.find(
+      { taskId: { $in: projectTaskIds } },
+      { taskId: 1, dependsOnId: 1 },
+    ).lean<Pick<TaskDependency, '_id' | 'id' | 'taskId' | 'dependsOnId'>[]>();
     if (edges.some((e) => e.taskId === id && e.dependsOnId === input.dependsOnId)) {
       throw conflict('ALREADY_EXISTS', 'This dependency already exists.');
     }
     if (wouldCreateCycle(edges, id, input.dependsOnId)) {
       throw unprocessable('DEPENDENCY_CYCLE', 'That dependency would create a loop.');
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.taskDependency.create({ data: { taskId: id, dependsOnId: input.dependsOnId } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      await TaskDependency.create({ taskId: id, dependsOnId: input.dependsOnId });
+      return this.activity.record({
         actorId: user.id,
         action: 'task.dependency.added',
         entityType: 'task',
@@ -220,16 +240,15 @@ export class TasksService {
   }
 
   async removeDependency(id: string, dependsOnId: string, user: SessionUser): Promise<TaskView> {
-    const dep = await this.prisma.db.taskDependency.findUnique({
-      where: { taskId_dependsOnId: { taskId: id, dependsOnId } },
-      include: { task: true, dependsOn: true },
-    });
+    const { TaskDependency } = this.database.models;
+    const dep = await TaskDependency.findOne({ taskId: id, dependsOnId })
+      .populate([{ path: 'task' }, { path: 'dependsOn' }])
+      .lean<TaskDependency & { task: Task; dependsOn: Task }>();
     if (!dep) throw notFound('Dependency');
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.taskDependency.delete({
-        where: { taskId_dependsOnId: { taskId: id, dependsOnId } },
-      });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const deleted = await TaskDependency.deleteOne({ taskId: id, dependsOnId });
+      if (deleted.deletedCount === 0) throw notFound('Dependency');
+      return this.activity.record({
         actorId: user.id,
         action: 'task.dependency.removed',
         entityType: 'task',

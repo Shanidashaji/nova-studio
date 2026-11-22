@@ -30,6 +30,10 @@ passed and the feature was exercised in the running app. Plan and gap analysis:
 | 2026-11-22 | Phases 9–13                                                      | pass (all packages) | pass | shared 76 · web 28 · API 86 (incl. 43 ERP integration tests) | API pass; web production build pass | `erp.spec.ts` 7/7 (desktop, against a production build)                                                                                                           |
 | 2026-11-22 | Full audit and fix pass ([report](ERP_COMPLETE_AUDIT_REPORT.md)) | pass (all packages) | pass | shared 87 · web 28 · API 104                                 | API pass; web production build pass | 72/76 on a production build without re-seeding (3 voice tests failing before the audit; journey 2 needs a fresh seed); axe 0 violations on 13 lenses, both themes |
 
+| 2026-11-22 | Production-readiness verification ([report §22](ERP_COMPLETE_AUDIT_REPORT.md)) | pass for shared, web, API, e2e; `packages/db` fails on the unfinished MongoDB migration | pass (shared, web, API) | shared 87 · web 34 · API 104 | API pass; web production build pass | 76/76 on a production build from a fresh seed (voice 16/16) |
+
+**Deployment readiness (2026-11-22): not ready.** The verification passed every automated check on the PostgreSQL/NestJS code and fixed two open audit items (C01, who sees budgets; C11, the three voice tests). It is not ready because: the backend is being moved to MongoDB on `feat/mongodb` and that version is unverified; request limits are still missing (C05); HSTS and Content-Security-Policy headers are not sent; and no production environment exists to check. Details and the full PASS / FAIL / BLOCKED list are in section 22 of the audit report. Nothing from the verification is committed.
+
 Notes on the e2e run: it ran against the integration-test database on separate ports (web :3200, API :4100), so it did not touch the development database or the servers on :3100/:4000. The full a11y suite was failing on colour contrast in the restyled theme. The sidebar parts were fixed here; the theme tokens belong to the parallel audit pass (`ERP_COMPLETE_AUDIT_REPORT.md`).
 
 ## Known gaps (honest list)
@@ -40,3 +44,7 @@ Notes on the e2e run: it ran against the integration-test database on separate p
 - The NOVA assistant has no tools for the ERP modules yet (Phase 14), and the Pulse attention queue does not yet show overdue invoices, low stock or waiting approvals.
 - Studio utilisation is computed only over the requested window. Session lists ignore the idle timeout, and password change is not rate-limited.
 - Single API instance assumed (SSE, lead-conversion guard). See ADR-0006.
+- Request limits (audit item C05, high priority): the general limit is configured but not applied, and failed sign-ins are not counted per account. A fix exists in `apps/api/src/auth/login-attempts.ts` and `apps/api/src/common/app-throttler.guard.ts` but is not connected to any module.
+- Production hardening not done: no HSTS or Content-Security-Policy header; a plain-http `WEB_ORIGIN` is accepted when `NODE_ENV=production`; the number of trusted proxies is fixed at one; `.env.example` does not mention `NODE_ENV`, which the `Secure` session cookie depends on.
+- Budgets and spend are hidden from roles without `finance:read` or `project:write`. Lead values and the sales pipeline total are still visible to every role that can open the workspace.
+- Node 24.7 or newer is required (password hashing uses `node:crypto` Argon2, absent in Node 22). Verified on Node 26.13.1; the repository has no `.nvmrc`.

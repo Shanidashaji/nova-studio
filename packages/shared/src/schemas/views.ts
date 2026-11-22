@@ -137,8 +137,10 @@ export interface ProjectSummary {
   deliveredAt: ISO | null;
   progress: number;
   health: HealthView;
-  budget: number;
-  spent: number;
+  /** Rupees. Null when the caller may not see what a production costs (`canSeeProjectMoney`). */
+  budget: number | null;
+  /** Rupees spent so far. Null under the same rule as `budget`. */
+  spent: number | null;
   team: MemberRef[];
   openTasks: number;
   blockedTasks: number;
@@ -264,11 +266,12 @@ export interface ProjectDetail extends ProjectSummary {
   shoots: ShootView[];
   members: (MemberRef & { role: string })[];
   transitions: TransitionView[];
+  /** Null when the caller may not see what a production costs (`canSeeProjectMoney`). */
   finance: {
     income: number;
     expenses: number;
     byCategory: { category: FinanceCategory; amount: number }[];
-  };
+  } | null;
   /** Pre-computed so the UI can explain why "Advance" is unavailable. */
   advance:
     | { ok: true; to: { id: string; label: string } | null }
@@ -347,7 +350,8 @@ export interface ClientView extends ClientRef {
   contactEmail: string | null;
   contactPhone: string | null;
   activeProjects: number;
-  lifetimeValue: number;
+  /** Sum of the client's production budgets. Null when hidden from the caller (`canSeeProjectMoney`). */
+  lifetimeValue: number | null;
   pendingApprovals: number;
   lastInteractionAt: ISO | null;
 }
