@@ -9,6 +9,7 @@ import {
 import { z } from 'zod';
 import { ENV, type Env } from '../../config/env';
 import { AssistantTools } from './assistant.tools';
+import { StudioTools } from './studio.tools';
 import type {
   AssistantContext,
   AssistantProvider,
@@ -37,6 +38,69 @@ Personality: calm, professional, friendly and clear — a capable colleague, not
 
 /** Tool definitions shared with the model. Inputs are validated with Zod before running. */
 const TOOLS: { def: Anthropic.Beta.BetaTool; schema: z.ZodType }[] = [
+  {
+    def: {
+      name: 'get_shoots_today',
+      description:
+        'Shoots happening today: shoot day number, status, call time, crew and artists, scene progress, issues and delays.',
+      input_schema: { type: 'object', properties: {} },
+    },
+    schema: z.object({}),
+  },
+  {
+    def: {
+      name: 'get_availability',
+      description:
+        'Crew members or artists who are free on a day (default today): not on a shoot, not on leave or blocked.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['crew', 'talent'] },
+          days_from_today: { type: 'integer', description: '0 = today, 1 = tomorrow' },
+        },
+        required: ['kind'],
+      },
+    },
+    schema: z.object({
+      kind: z.enum(['crew', 'talent']),
+      days_from_today: z.number().int().min(0).max(60).optional(),
+    }),
+  },
+  {
+    def: {
+      name: 'get_schedule_conflicts',
+      description:
+        'Double bookings of crew, artists or equipment and overlapping shoots in the next three weeks.',
+      input_schema: { type: 'object', properties: {} },
+    },
+    schema: z.object({}),
+  },
+  {
+    def: {
+      name: 'get_overdue_tasks',
+      description:
+        'Tasks past their due date across all active productions, with owner and blockers.',
+      input_schema: { type: 'object', properties: {} },
+    },
+    schema: z.object({}),
+  },
+  {
+    def: {
+      name: 'get_script_approvals',
+      description: 'Scripts and creative documents waiting for approval.',
+      input_schema: { type: 'object', properties: {} },
+    },
+    schema: z.object({}),
+  },
+  {
+    def: {
+      name: 'get_manager_focus',
+      description:
+        'What the studio manager should focus on today: the command centre attention list with counts.',
+      input_schema: { type: 'object', properties: {} },
+    },
+    schema: z.object({}),
+  },
   {
     def: {
       name: 'get_attention',
@@ -227,6 +291,7 @@ export class ClaudeProvider implements AssistantProvider {
   constructor(
     @Inject(ENV) env: Env,
     private readonly tools: AssistantTools,
+    private readonly studio: StudioTools,
   ) {
     this.client = env.ANTHROPIC_API_KEY
       ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1, timeout: 60_000 })
@@ -364,6 +429,21 @@ export class ClaudeProvider implements AssistantProvider {
     };
 
     switch (name) {
+      case 'get_shoots_today':
+        return this.studio.shootsToday();
+      case 'get_availability':
+        return this.studio.availability(
+          input.kind as 'crew' | 'talent',
+          (input.days_from_today as number | undefined) ?? 0,
+        );
+      case 'get_schedule_conflicts':
+        return this.studio.conflicts();
+      case 'get_overdue_tasks':
+        return this.studio.overdueTasks();
+      case 'get_script_approvals':
+        return this.studio.scriptApprovals();
+      case 'get_manager_focus':
+        return this.studio.focus(ctx);
       case 'get_attention':
         return this.tools.attention(ctx);
       case 'get_operations_summary':

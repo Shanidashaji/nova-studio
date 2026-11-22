@@ -45,6 +45,24 @@ import type {
   ShootView,
   TaskView,
   WorkflowTemplateView,
+  CapacityView,
+  CastingNeed,
+  CommandCenterView,
+  CommunicationsOverview,
+  MessageTemplateView,
+  PostProductionView,
+  ProjectBudgetView,
+  ProjectReadinessView,
+  RecommendationResult,
+  ReportsView,
+  SceneView,
+  ScriptDetail,
+  ScriptSummary,
+  ShootDayView,
+  ShootWorkspaceView,
+  TalentDetail,
+  TalentView,
+  TaskBoardView,
 } from '@nova/shared';
 import { api, qs } from './api';
 
@@ -309,4 +327,149 @@ export const useDepartments = () =>
   useQuery({
     queryKey: erpKeys.departments,
     queryFn: () => api<DepartmentView[]>('/hr/departments'),
+  });
+
+// ── Production studio layer ───────────────────────────────────────────────────
+
+type Params = Record<string, string | undefined>;
+
+export const studioKeys = {
+  command: ['command-center'] as const,
+  shootDay: (date?: string) => ['shoot-day', date] as const,
+  workspace: (id: string) => ['shoot-workspace', id] as const,
+  talent: (q: Params) => ['talent', q] as const,
+  talentOne: (id: string) => ['talent-one', id] as const,
+  casting: (shootId: string) => ['casting', shootId] as const,
+  recommend: (kind: 'talent' | 'crew', q: Params) => ['recommend', kind, q] as const,
+  scripts: (q: Params) => ['scripts', q] as const,
+  script: (id: string) => ['script', id] as const,
+  scenes: (q: Params) => ['scenes', q] as const,
+  readiness: (projectId: string) => ['readiness', projectId] as const,
+  post: ['post-production'] as const,
+  comms: (q: Params) => ['communications', q] as const,
+  templates: ['communications', 'templates'] as const,
+  budget: (projectId: string) => ['budget', projectId] as const,
+  tasks: (q: Params) => ['task-board', q] as const,
+  capacity: (q: Params) => ['capacity', q] as const,
+  reports: ['reports'] as const,
+  inbox: (filter: string) => ['notifications', 'inbox', filter] as const,
+};
+
+export const useCommandCenter = () =>
+  useQuery({
+    queryKey: studioKeys.command,
+    queryFn: () => api<CommandCenterView>('/command-center'),
+  });
+
+export const useShootDayList = (date?: string) =>
+  useQuery({
+    queryKey: studioKeys.shootDay(date),
+    queryFn: () => api<ShootDayView>(`/shoot-day${qs({ date })}`),
+  });
+
+export const useShootWorkspace = (id: string | null) =>
+  useQuery({
+    queryKey: studioKeys.workspace(id ?? ''),
+    queryFn: () => api<ShootWorkspaceView>(`/shoots/${id}/workspace`),
+    enabled: enabledId(id),
+  });
+
+export const useTalent = (q: Params = {}) =>
+  useQuery({ queryKey: studioKeys.talent(q), queryFn: () => api<TalentView[]>(`/talent${qs(q)}`) });
+
+export const useTalentOne = (id: string | null) =>
+  useQuery({
+    queryKey: studioKeys.talentOne(id ?? ''),
+    queryFn: () => api<TalentDetail>(`/talent/${id}`),
+    enabled: enabledId(id),
+  });
+
+export const useCasting = (shootId: string | null) =>
+  useQuery({
+    queryKey: studioKeys.casting(shootId ?? ''),
+    queryFn: () => api<CastingNeed[]>(`/shoots/${shootId}/casting`),
+    enabled: enabledId(shootId),
+  });
+
+export const useRecommendations = (kind: 'talent' | 'crew', q: Params, enabled: boolean) =>
+  useQuery({
+    queryKey: studioKeys.recommend(kind, q),
+    queryFn: () => api<RecommendationResult>(`/recommendations/${kind}${qs(q)}`),
+    enabled,
+  });
+
+export const useScripts = (q: Params = {}) =>
+  useQuery({
+    queryKey: studioKeys.scripts(q),
+    queryFn: () => api<ScriptSummary[]>(`/scripts${qs(q)}`),
+  });
+
+export const useScript = (id: string | null) =>
+  useQuery({
+    queryKey: studioKeys.script(id ?? ''),
+    queryFn: () => api<ScriptDetail>(`/scripts/${id}`),
+    enabled: enabledId(id),
+  });
+
+export const useScenes = (q: Params, enabled = true) =>
+  useQuery({
+    queryKey: studioKeys.scenes(q),
+    queryFn: () => api<SceneView[]>(`/scenes${qs(q)}`),
+    enabled,
+  });
+
+export const useReadiness = (projectId: string | null) =>
+  useQuery({
+    queryKey: studioKeys.readiness(projectId ?? ''),
+    queryFn: () => api<ProjectReadinessView>(`/projects/${projectId}/readiness`),
+    enabled: enabledId(projectId),
+  });
+
+export const usePostProduction = () =>
+  useQuery({
+    queryKey: studioKeys.post,
+    queryFn: () => api<PostProductionView>('/post-production'),
+  });
+
+export const useCommunications = (q: Params = {}) =>
+  useQuery({
+    queryKey: studioKeys.comms(q),
+    queryFn: () => api<CommunicationsOverview>(`/communications${qs(q)}`),
+  });
+
+export const useTemplates = () =>
+  useQuery({
+    queryKey: studioKeys.templates,
+    queryFn: () => api<MessageTemplateView[]>('/communications/templates'),
+  });
+
+export const useProjectBudget = (projectId: string | null, enabled = true) =>
+  useQuery({
+    queryKey: studioKeys.budget(projectId ?? ''),
+    queryFn: () => api<ProjectBudgetView>(`/projects/${projectId}/budget`),
+    enabled: enabled && enabledId(projectId),
+  });
+
+export const useTaskBoard = (q: Params = {}) =>
+  useQuery({
+    queryKey: studioKeys.tasks(q),
+    queryFn: () => api<TaskBoardView>(`/task-board${qs(q)}`),
+  });
+
+export const useCapacity = (q: Params = {}) =>
+  useQuery({
+    queryKey: studioKeys.capacity(q),
+    queryFn: () => api<CapacityView>(`/capacity${qs(q)}`),
+  });
+
+export const useReports = () =>
+  useQuery({ queryKey: studioKeys.reports, queryFn: () => api<ReportsView>('/reports') });
+
+export const useInbox = (filter: string) =>
+  useQuery({
+    queryKey: studioKeys.inbox(filter),
+    queryFn: () =>
+      api<{ items: NotificationView[]; unread: number; open: number }>(
+        `/notifications/inbox${qs({ filter })}`,
+      ),
   });

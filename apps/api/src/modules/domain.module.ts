@@ -16,6 +16,7 @@ import { ReviewsService } from './reviews/reviews.service';
 import { ScheduleConflicts } from './schedule/schedule-conflicts';
 import { ScheduleController } from './schedule/schedule.controller';
 import { ScheduleService } from './schedule/schedule.service';
+import { ShootReadiness } from './schedule/shoot-readiness';
 import { SearchController } from './search/search.controller';
 import { TasksController } from './tasks/tasks.controller';
 import { TasksService } from './tasks/tasks.service';
@@ -54,6 +55,7 @@ import { WorkflowService } from './workflow/workflow.service';
     ReviewsService,
     ScheduleService,
     ScheduleConflicts,
+    ShootReadiness,
     TeamService,
     ClientsService,
     FinanceService,
@@ -64,6 +66,8 @@ import { WorkflowService } from './workflow/workflow.service';
     TasksService,
     ReviewsService,
     ScheduleService,
+    ScheduleConflicts,
+    ShootReadiness,
     TeamService,
     ClientsService,
     InsightsService,

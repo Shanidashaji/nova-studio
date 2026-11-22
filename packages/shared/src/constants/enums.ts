@@ -132,9 +132,22 @@ export const STUDIO_LOCATION_LABELS = labels(STUDIO_LOCATIONS, {
   CHENNAI: 'Chennai',
 });
 
-export const SHOOT_STATUSES = ['PLANNED', 'CONFIRMED', 'WRAPPED', 'CANCELLED'] as const;
+export const SHOOT_STATUSES = [
+  'PLANNED',
+  'CONFIRMED',
+  'IN_PROGRESS',
+  'WRAPPED',
+  'CANCELLED',
+] as const;
 export const ShootStatus = z.enum(SHOOT_STATUSES);
 export type ShootStatus = z.infer<typeof ShootStatus>;
+export const SHOOT_STATUS_LABELS: Record<ShootStatus, string> = {
+  PLANNED: 'Planned',
+  CONFIRMED: 'Confirmed',
+  IN_PROGRESS: 'Shooting',
+  WRAPPED: 'Wrapped',
+  CANCELLED: 'Cancelled',
+};
 
 export const ASSET_CATEGORIES = [
   'CAMERA',
@@ -198,6 +211,7 @@ export const FINANCE_CATEGORIES = [
   'CONSUMABLES',
   'POST_PRODUCTION',
   'MAINTENANCE',
+  'TALENT',
 ] as const;
 export const FinanceCategory = z.enum(FINANCE_CATEGORIES);
 export type FinanceCategory = z.infer<typeof FinanceCategory>;
@@ -240,6 +254,13 @@ export const ENTITY_TYPES = [
   'milestone',
   'risk',
   'contact',
+  'talent',
+  'script',
+  'scene',
+  'message',
+  'template',
+  'budget',
+  'notification',
 ] as const;
 export const EntityType = z.enum(ENTITY_TYPES);
 export type EntityType = z.infer<typeof EntityType>;

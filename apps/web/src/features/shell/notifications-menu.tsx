@@ -1,11 +1,12 @@
 'use client';
 
 import { Popover as P } from 'radix-ui';
-import { Bell } from 'lucide-react';
+import { Bell, CheckCheck, CircleDot, Undo2 } from 'lucide-react';
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { ago } from '@/lib/format';
 import { useApiMutation } from '@/lib/mutations';
-import { useNotifications } from '@/lib/queries';
+import { useInbox } from '@/lib/queries';
 import { cn } from '@/lib/utils';
 import { useWorkspace, type InspectType, type Lens } from '@/store/workspace';
 import { visibleLenses } from './lenses';
@@ -19,6 +20,8 @@ const INSPECTABLE = new Set<InspectType>([
   'shoot',
   'asset',
   'lead',
+  'talent',
+  'script',
 ]);
 
 /** Records without an inspector open the lens where they are worked on. */
@@ -38,10 +41,27 @@ const LENS_FOR: Record<string, Lens> = {
   studio_booking: 'schedule',
   user: 'settings',
   role: 'settings',
+  message: 'comms',
+  template: 'comms',
+  scene: 'scripts',
+  budget: 'productions',
 };
 
 export function NotificationsMenu() {
-  const q = useNotifications();
+  const [filter, setFilter] = useState<'all' | 'unread' | 'open' | 'resolved'>('open');
+  const q = useInbox(filter);
+  const mark = useApiMutation<{ id: string; change: 'unread' | 'resolve' | 'reopen' }>(
+    'POST',
+    ({ id, change }) => `/notifications/${id}/${change}`,
+    {
+      success: (_r, b) =>
+        b.change === 'resolve'
+          ? 'Marked resolved'
+          : b.change === 'reopen'
+            ? 'Reopened'
+            : 'Marked unread',
+    },
+  );
   const inspect = useWorkspace((s) => s.inspect);
   const setLens = useWorkspace((s) => s.setLens);
   const { permissions } = useUser();
@@ -85,6 +105,28 @@ export function NotificationsMenu() {
             >
               Mark all read
             </Button>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label="Show"
+            className="flex gap-1 border-b border-line px-2 py-1.5"
+          >
+            {(['open', 'unread', 'resolved', 'all'] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                role="radio"
+                aria-checked={filter === f}
+                onClick={() => setFilter(f)}
+                className={cn(
+                  'h-6 rounded px-2 text-xs capitalize pointer-coarse:h-8',
+                  filter === f ? 'bg-surface-3 text-text' : 'text-text-3 hover:text-text',
+                )}
+              >
+                {f}
+                {f === 'open' && q.data ? ` (${q.data.open})` : ''}
+              </button>
+            ))}
           </div>
           <ul className="max-h-96 overflow-y-auto p-1">
             {q.data?.items.length === 0 ? (
@@ -140,6 +182,37 @@ export function NotificationsMenu() {
                     </span>
                   </button>
                 </P.Close>
+                <div className="-mt-1 flex justify-end gap-1 px-2 pb-1">
+                  {n.readAt ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-2xs"
+                      onClick={() => mark.mutate({ id: n.id, change: 'unread' })}
+                    >
+                      <CircleDot /> Unread
+                    </Button>
+                  ) : null}
+                  {n.resolvedAt ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-2xs"
+                      onClick={() => mark.mutate({ id: n.id, change: 'reopen' })}
+                    >
+                      <Undo2 /> Reopen
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-2xs"
+                      onClick={() => mark.mutate({ id: n.id, change: 'resolve' })}
+                    >
+                      <CheckCheck /> Resolve
+                    </Button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

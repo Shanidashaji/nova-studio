@@ -25,12 +25,14 @@ import { useWorkspace } from '@/store/workspace';
 import { InspectorSection, KeyValue } from '../inspector-router';
 import { ProjectBudget, ProjectHistory, ProjectSchedule } from './project-extras';
 import { ProjectDeliverables } from './project-deliverables';
+import { ProjectBudgetPlan, ProjectPreProduction } from './project-plan-tabs';
 import { ProjectTasks } from './project-tasks';
 import { ProjectWorkflow } from './project-workflow';
 
 const TABS = [
   ['overview', 'Overview'],
   ['workflow', 'Workflow'],
+  ['pre', 'Pre-production'],
   ['tasks', 'Tasks'],
   ['deliverables', 'Deliverables'],
   ['schedule', 'Shoots'],
@@ -96,7 +98,13 @@ export function ProjectInspector({ id, section }: { id: string; section?: string
             {tab === 'tasks' ? <ProjectTasks p={q.data} /> : null}
             {tab === 'deliverables' ? <ProjectDeliverables p={q.data} /> : null}
             {tab === 'schedule' ? <ProjectSchedule p={q.data} /> : null}
-            {tab === 'budget' ? <ProjectBudget p={q.data} /> : null}
+            {tab === 'pre' ? <ProjectPreProduction p={q.data} /> : null}
+            {tab === 'budget' ? (
+              <>
+                <ProjectBudgetPlan p={q.data} />
+                <ProjectBudget p={q.data} />
+              </>
+            ) : null}
             {tab === 'history' ? <ProjectHistory p={q.data} /> : null}
           </div>
         </div>

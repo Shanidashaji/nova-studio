@@ -86,6 +86,15 @@ export type Models = {
   StudioBooking: Model<T.StudioBooking>;
   Document: Model<T.Document>;
   DocumentVersion: Model<T.DocumentVersion>;
+  Talent: Model<T.Talent>;
+  TalentBooking: Model<T.TalentBooking>;
+  Script: Model<T.Script>;
+  ScriptVersion: Model<T.ScriptVersion>;
+  Scene: Model<T.Scene>;
+  ShootLogEntry: Model<T.ShootLogEntry>;
+  MessageTemplate: Model<T.MessageTemplate>;
+  ClientMessage: Model<T.ClientMessage>;
+  BudgetLine: Model<T.BudgetLine>;
 };
 
 /** Thrown when a write targets a record that does not exist (HTTP 404). */

@@ -6,7 +6,9 @@ import { ClientInspector } from './client-inspector';
 import { LeadInspector } from './lead-inspector';
 import { MemberInspector } from './member-inspector';
 import { ProjectInspector } from './project/project-inspector';
+import { ScriptInspector } from './script-inspector';
 import { ShootInspector } from './shoot-inspector';
+import { TalentInspector } from './talent-inspector';
 import { TaskInspector } from './task-inspector';
 import { WorkflowsInspector } from './workflows-inspector';
 
@@ -29,6 +31,10 @@ export function InspectorRouter({ target }: { target: InspectRef }) {
       return <LeadInspector id={target.id} />;
     case 'workflows':
       return <WorkflowsInspector />;
+    case 'talent':
+      return <TalentInspector id={target.id} />;
+    case 'script':
+      return <ScriptInspector id={target.id} />;
   }
 }
 

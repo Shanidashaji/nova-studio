@@ -1,11 +1,20 @@
 import { Injectable } from '@nestjs/common';
-import type { Asset, AssetBooking, CrewCall, Project, Shoot, TeamMember } from '@nova/db';
+import type {
+  Asset,
+  AssetBooking,
+  CrewCall,
+  Project,
+  Shoot,
+  Talent,
+  TalentBooking,
+  TeamMember,
+} from '@nova/db';
 import { findConflicts, type ScheduleView, type ShootView } from '@nova/shared';
 import { DatabaseService } from '../../database/database.service';
 
 interface Reservation {
   id: string;
-  kind: 'asset' | 'member';
+  kind: 'asset' | 'member' | 'talent';
   resourceId: string;
   resourceName: string;
   startsAt: Date;
@@ -23,9 +32,9 @@ export class ScheduleConflicts {
   constructor(private readonly database: DatabaseService) {}
 
   async reservations(): Promise<Reservation[]> {
-    const { AssetBooking, CrewCall, Shoot } = this.database.models;
+    const { AssetBooking, CrewCall, Shoot, TalentBooking } = this.database.models;
     const cancelled = await Shoot.distinct('_id', { status: 'CANCELLED' });
-    const [bookings, calls] = await Promise.all([
+    const [bookings, calls, talent] = await Promise.all([
       // Project-only bookings (no shoot) plus bookings of shoots that are not cancelled.
       AssetBooking.find({ $or: [{ shootId: null }, { shootId: { $nin: cancelled } }] })
         .populate([
@@ -43,6 +52,10 @@ export class ScheduleConflicts {
       CrewCall.find({ shootId: { $nin: cancelled } })
         .populate([{ path: 'teamMember' }, { path: 'shoot' }])
         .lean<(CrewCall & { teamMember: TeamMember; shoot: Shoot })[]>(),
+      // Released artists no longer hold the date.
+      TalentBooking.find({ shootId: { $nin: cancelled }, status: { $ne: 'RELEASED' } })
+        .populate([{ path: 'talent', select: { name: 1 } }, { path: 'shoot' }])
+        .lean<(TalentBooking & { talent: Pick<Talent, 'name'> | null; shoot: Shoot | null })[]>(),
     ]);
     return [
       ...bookings.map((b) => ({
@@ -65,6 +78,18 @@ export class ScheduleConflicts {
         shootId: c.shootId,
         label: c.shoot.title,
       })),
+      ...talent
+        .filter((t) => t.shoot && t.talent)
+        .map((t) => ({
+          id: t.id,
+          kind: 'talent' as const,
+          resourceId: t.talentId,
+          resourceName: t.talent!.name,
+          startsAt: t.shoot!.startsAt,
+          endsAt: t.shoot!.endsAt,
+          shootId: t.shootId,
+          label: t.shoot!.title,
+        })),
     ];
   }
 
@@ -125,6 +150,7 @@ export class ScheduleConflicts {
         const entry = {
           bookingId: r.kind === 'asset' ? r.id : null,
           crewCallId: r.kind === 'member' ? r.id : null,
+          talentBookingId: r.kind === 'talent' ? r.id : null,
           with: `${r.resourceName} is also booked for “${o.label}”`,
         };
         result.set(r.shootId, [...(result.get(r.shootId) ?? []), entry]);

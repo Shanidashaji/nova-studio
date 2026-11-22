@@ -20,6 +20,8 @@ import type {
   Shoot,
   StageDefinition,
   StageTransition,
+  Talent,
+  TalentBooking,
   Task,
   TaskDependency,
   TeamMember,
@@ -33,6 +35,7 @@ import {
   currentStage,
   daysBetween,
   DAY_MS,
+  shootDayKeys,
   evaluateForwardTransition,
   type MemberRef,
   type Permission,
@@ -169,12 +172,20 @@ export const shootPopulate: PopulateOptions[] = [
   { path: 'project', select: { code: 1, title: 1, coverImageUrl: 1 } },
   { path: 'crew', populate: { path: 'teamMember' } },
   { path: 'bookings', populate: { path: 'asset' } },
+  {
+    path: 'talent',
+    match: { status: { $ne: 'RELEASED' } },
+    populate: { path: 'talent', select: { name: 1, kind: 1 } },
+  },
+  { path: 'productionManager' },
 ];
 
 export type ShootRow = Shoot & {
   project: Pick<Project, '_id' | 'id' | 'code' | 'title' | 'coverImageUrl'>;
   crew: (CrewCall & { teamMember: TeamMember })[];
   bookings: (AssetBooking & { asset: Asset })[];
+  talent?: (TalentBooking & { talent: Pick<Talent, '_id' | 'id' | 'name' | 'kind'> | null })[];
+  productionManager?: TeamMember | null;
 };
 
 /** Former name of `ShootRow`. */
@@ -204,6 +215,7 @@ export const detailPopulate: PopulateOptions[] = [
         populate: { path: 'feedback', options: { sort: { createdAt: 1 } } },
       },
       { path: 'approvals', options: { sort: { requestedAt: -1 } } },
+      { path: 'editor' },
     ],
   },
   { path: 'shoots', options: { sort: { startsAt: 1 } }, populate: shootPopulate },
@@ -233,6 +245,7 @@ export type DetailRow = Omit<SummaryRow, 'stages' | 'tasks' | 'deliverables' | '
   deliverables: (Deliverable & {
     rounds: (RevisionRound & { feedback: FeedbackItem[] })[];
     approvals: Approval[];
+    editor?: TeamMember | null;
   })[];
   shoots: ShootRow[];
   transitions: (StageTransition & {
@@ -386,6 +399,7 @@ export function toTaskView(t: TaskViewRow): TaskView {
     assignee: t.assignee ? memberRef(t.assignee) : null,
     dependsOn: t.dependsOn.map((d) => d.dependsOnId),
     parentId: t.parentId,
+    shootId: t.shootId ?? null,
     updatedAt: iso(t.updatedAt),
   };
 }
@@ -414,6 +428,18 @@ export function toShootView(s: ShootRow, conflicts: ShootView['conflicts'] = [])
       id: b.id,
       asset: { id: b.asset.id, name: b.asset.name, category: b.asset.category },
     })),
+    talent: (s.talent ?? [])
+      .filter((t) => t.talent)
+      .map((t) => ({
+        id: t.id,
+        character: t.character,
+        status: t.status,
+        talent: { id: t.talent!.id, name: t.talent!.name, kind: t.talent!.kind },
+      })),
+    productionManager: s.productionManager ? memberRef(s.productionManager) : null,
+    crewCallTime: s.crewCallTime ?? null,
+    callSheetPublishedAt: isoOrNull(s.callSheetPublishedAt ?? null),
+    dayCount: shootDayKeys(s.startsAt, s.endsAt).length,
     conflicts,
   };
 }
@@ -429,6 +455,8 @@ export const approvalView = (a: Approval) => ({
   note: a.note,
   deliverableId: a.deliverableId,
   projectStageId: a.projectStageId,
+  dueAt: isoOrNull(a.dueAt ?? null),
+  overdue: a.status === 'PENDING' && !!a.dueAt && a.dueAt.getTime() < Date.now(),
 });
 
 export function toDetail(
@@ -500,6 +528,10 @@ export function toDetail(
       currentVersion: d.currentVersion,
       dueDate: isoOrNull(d.dueDate),
       previewImageUrl: d.previewImageUrl,
+      editor: d.editor ? memberRef(d.editor) : null,
+      editProgress: d.editProgress ?? 0,
+      internalReviewStatus: d.internalReviewStatus ?? 'NOT_STARTED',
+      internalReviewNote: d.internalReviewNote ?? null,
       rounds: d.rounds.map((r) => ({
         id: r.id,
         number: r.number,
@@ -512,6 +544,7 @@ export function toDetail(
           body: f.body,
           author: f.author,
           status: f.status,
+          source: f.source ?? 'CLIENT',
           createdAt: iso(f.createdAt),
         })),
       })),

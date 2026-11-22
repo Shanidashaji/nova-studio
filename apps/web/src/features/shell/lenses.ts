@@ -1,8 +1,15 @@
 import type { Permission } from '@nova/shared';
 import {
+  CalendarDays,
+  ChartColumn,
+  Drama,
+  Kanban,
+  Megaphone,
+  MonitorPlay,
+  ScrollText,
+  Film,
   BadgeCheck,
   BrainCircuit,
-  Boxes,
   Clapperboard,
   FileStack,
   Handshake,
@@ -33,11 +40,60 @@ export const LENS_META: Record<
   }
 > = {
   pulse: {
-    label: 'Home',
-    title: 'Studio Pulse',
+    label: 'Command Center',
+    title: 'Studio Command Center',
     icon: House,
-    description: 'Your creative operations at a glance',
+    description: 'What needs action now, today’s shoots and the whole operation at a glance',
     group: 'operate',
+  },
+  tasks: {
+    label: 'Tasks',
+    title: 'Tasks',
+    icon: Kanban,
+    description: 'Every task across productions — board, list and calendar',
+    group: 'operate',
+  },
+  comms: {
+    label: 'Client Comms',
+    title: 'Client Communication',
+    icon: Megaphone,
+    description: 'Automated client messages, templates and delivery status',
+    group: 'operate',
+  },
+  shootday: {
+    label: 'Shoot Day',
+    title: 'Shoot Day',
+    icon: Film,
+    description: 'Call sheet, scenes, artists, checklist and the on-set log',
+    group: 'production',
+  },
+  scripts: {
+    label: 'Scripts',
+    title: 'Scripts & Pre-production',
+    icon: ScrollText,
+    description: 'Briefs, scripts, versions, approvals, scene breakdown and readiness',
+    group: 'production',
+  },
+  talent: {
+    label: 'Artists & Crew',
+    title: 'Artists & Crew',
+    icon: Drama,
+    description: 'Artist roster, crew, availability and rule-based recommendations',
+    group: 'production',
+  },
+  post: {
+    label: 'Post & Reviews',
+    title: 'Post-production & Reviews',
+    icon: MonitorPlay,
+    description: 'Editors, cuts, internal and client review, revisions and delivery',
+    group: 'production',
+  },
+  reports: {
+    label: 'Reports',
+    title: 'Reports & Capacity',
+    icon: ChartColumn,
+    description: 'Studio capacity, utilisation, delays, budgets and client activity',
+    group: 'knowledge',
   },
   productions: {
     label: 'Projects',
@@ -47,11 +103,11 @@ export const LENS_META: Record<
     group: 'operate',
   },
   schedule: {
-    label: 'Resources',
-    title: 'Schedule & Resources',
-    icon: Boxes,
-    description: 'Shoots, crew and equipment',
-    group: 'operate',
+    label: 'Shoot Calendar',
+    title: 'Shoot Calendar & Resources',
+    icon: CalendarDays,
+    description: 'Day, week, month and timeline views of every shoot, crew call and booking',
+    group: 'production',
   },
   people: {
     label: 'Creative Team',
@@ -129,9 +185,10 @@ export const LENS_META: Record<
   },
 };
 
-export type LensGroup = 'operate' | 'business' | 'knowledge' | 'settings';
+export type LensGroup = 'operate' | 'production' | 'business' | 'knowledge' | 'settings';
 export const LENS_GROUPS: { key: LensGroup; label: string }[] = [
   { key: 'operate', label: 'Operate' },
+  { key: 'production', label: 'Production' },
   { key: 'business', label: 'Business' },
   { key: 'knowledge', label: 'Knowledge' },
   { key: 'settings', label: 'Account' },

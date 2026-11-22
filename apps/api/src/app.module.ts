@@ -11,6 +11,7 @@ import { ActivityModule } from './modules/activity/activity.module';
 import { AssistantModule } from './modules/assistant/assistant.module';
 import { DomainModule } from './modules/domain.module';
 import { ErpModule } from './modules/erp.module';
+import { StudioModule } from './modules/studio/studio.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { ErpModule } from './modules/erp.module';
     AuthModule,
     DomainModule,
     ErpModule,
+    StudioModule,
     AssistantModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: HttpExceptionFilter }],

@@ -94,6 +94,7 @@ export class ActivityController {
         entityType: n.entityType,
         entityId: n.entityId,
         readAt: isoOrNull(n.readAt),
+        resolvedAt: isoOrNull(n.resolvedAt ?? null),
         createdAt: iso(n.createdAt),
       })),
       unread,

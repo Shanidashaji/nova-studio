@@ -37,6 +37,15 @@ export const COLLECTION_VALIDATORS: Partial<Record<ModelName, Record<string, unk
   StockItem: { onHand: { $gte: 0 } },
   LeaveRequest: { $expr: { $gte: ['$endDate', '$startDate'] } },
   StudioBooking: { $expr: { $gt: ['$endsAt', '$startsAt'] } },
+  Talent: { dayRate: { $gte: 0 }, experienceYears: { $gte: 0 } },
+  TalentBooking: { fee: { $gte: 0 } },
+  BudgetLine: { estimated: { $gte: 0 } },
+  Scene: { estimatedMinutes: { $gte: 0 } },
+  ShootLogEntry: { minutesLost: { $gte: 0 } },
+  // Deliverables created before post-production tracking have no editProgress yet.
+  Deliverable: {
+    $or: [{ editProgress: { $exists: false } }, { editProgress: { $gte: 0, $lte: 100 } }],
+  },
 };
 
 /** True for a write rejected by a collection validator. */

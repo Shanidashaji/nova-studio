@@ -166,6 +166,7 @@ export interface TaskView {
   dependsOn: string[];
   /** Parent task when this is a subtask. */
   parentId: string | null;
+  shootId: string | null;
   updatedAt: ISO;
 }
 
@@ -175,6 +176,8 @@ export interface FeedbackView {
   body: string;
   author: string;
   status: FeedbackStatus;
+  /** Client note or the studio's internal review. */
+  source: 'CLIENT' | 'INTERNAL';
   createdAt: ISO;
 }
 
@@ -188,6 +191,10 @@ export interface DeliverableView {
   currentVersion: number;
   dueDate: ISO | null;
   previewImageUrl: string | null;
+  editor: MemberRef | null;
+  editProgress: number;
+  internalReviewStatus: 'NOT_STARTED' | 'PENDING' | 'APPROVED' | 'CHANGES_REQUESTED';
+  internalReviewNote: string | null;
   rounds: {
     id: string;
     number: number;
@@ -210,6 +217,9 @@ export interface ApprovalView {
   note: string | null;
   deliverableId: string | null;
   projectStageId: string | null;
+  /** Review deadline; `overdue` when still pending after it. */
+  dueAt: ISO | null;
+  overdue: boolean;
 }
 
 export interface ProjectStageView {
@@ -253,7 +263,23 @@ export interface ShootView {
   notes: string | null;
   crew: { id: string; role: string; member: MemberRef }[];
   bookings: { id: string; asset: { id: string; name: string; category: AssetCategory } }[];
-  conflicts: { bookingId: string | null; crewCallId: string | null; with: string }[];
+  talent: {
+    id: string;
+    character: string;
+    status: 'HOLD' | 'CONFIRMED' | 'RELEASED';
+    talent: { id: string; name: string; kind: string };
+  }[];
+  productionManager: MemberRef | null;
+  crewCallTime: string | null;
+  callSheetPublishedAt: ISO | null;
+  /** Calendar days the shoot spans (IST); a 3-day shoot is 3. */
+  dayCount: number;
+  conflicts: {
+    bookingId: string | null;
+    crewCallId: string | null;
+    talentBookingId?: string | null;
+    with: string;
+  }[];
 }
 
 export interface ProjectDetail extends ProjectSummary {
@@ -306,7 +332,7 @@ export interface ScheduleView {
   shoots: ShootView[];
   assets: AssetView[];
   conflicts: {
-    resourceType: 'asset' | 'member';
+    resourceType: 'asset' | 'member' | 'talent';
     resourceId: string;
     resourceName: string;
     bookingIds: [string, string];
@@ -449,11 +475,22 @@ export interface NotificationView {
   entityType: string | null;
   entityId: string | null;
   readAt: ISO | null;
+  resolvedAt: ISO | null;
   createdAt: ISO;
 }
 
 export interface SearchResult {
-  type: 'project' | 'task' | 'client' | 'member' | 'asset' | 'shoot' | 'lead';
+  type:
+    | 'project'
+    | 'task'
+    | 'client'
+    | 'member'
+    | 'asset'
+    | 'shoot'
+    | 'lead'
+    | 'talent'
+    | 'script'
+    | 'document';
   id: string;
   title: string;
   subtitle: string;

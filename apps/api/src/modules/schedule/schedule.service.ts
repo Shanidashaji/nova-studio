@@ -7,11 +7,14 @@ import {
   type LeaveRequest,
   type Project,
   type Shoot,
+  type TalentBooking,
   type TeamMember,
 } from '@nova/db';
 import {
   clashesWith,
   DAY_MS,
+  DEFAULT_SHOOT_CHECKLIST,
+  SHOOT_STATUS_LABELS,
   leaveOverlaps,
   rangesOverlap,
   STUDIO_LOCATION_LABELS,
@@ -31,6 +34,7 @@ import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { iso, shootPopulate, toShootView, type ShootRow } from '../projects/project.mapper';
 import { ScheduleConflicts } from './schedule-conflicts';
+import { ShootReadiness } from './shoot-readiness';
 
 const fmt = (d: Date) =>
   d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
@@ -55,6 +59,7 @@ export class ScheduleService {
     private readonly database: DatabaseService,
     private readonly activity: ActivityService,
     private readonly conflicts: ScheduleConflicts,
+    private readonly readiness: ShootReadiness,
   ) {}
 
   private window(query: RangeQuery) {
@@ -161,7 +166,12 @@ export class ScheduleService {
     const project = await this.database.models.Project.findById(input.projectId).lean<Project>();
     if (!project) throw unprocessable('INVALID_PROJECT', 'Choose an existing project.');
     const row = await this.database.transaction(async () => {
-      const shoot = (await this.database.models.Shoot.create(input)).toObject<Shoot>();
+      const shoot = (
+        await this.database.models.Shoot.create({
+          ...input,
+          checklist: DEFAULT_SHOOT_CHECKLIST.map((label) => ({ label })),
+        })
+      ).toObject<Shoot>();
       const log = await this.activity.record({
         actorId: user.id,
         action: 'shoot.created',
@@ -189,6 +199,11 @@ export class ScheduleService {
     const moved =
       startsAt.getTime() !== before.startsAt.getTime() ||
       endsAt.getTime() !== before.endsAt.getTime();
+    const statusChange =
+      input.status !== undefined && input.status !== before.status ? input.status : null;
+    const stamps = statusChange
+      ? await this.assertStatusChange(before, statusChange, { startsAt, endsAt })
+      : {};
     const revived =
       before.status === 'CANCELLED' && input.status !== undefined && input.status !== 'CANCELLED';
     const staysCancelled = (input.status ?? before.status) === 'CANCELLED';
@@ -203,7 +218,10 @@ export class ScheduleService {
       }
     }
     const row = await this.database.transaction(async () => {
-      const updated = await this.database.models.Shoot.updateOne({ _id: id }, { $set: input });
+      const updated = await this.database.models.Shoot.updateOne(
+        { _id: id },
+        { $set: { ...input, ...stamps } },
+      );
       if (updated.matchedCount === 0) throw notFound('Shoot');
       // Equipment bookings follow the shoot's time window.
       if (input.startsAt || input.endsAt) {
@@ -220,12 +238,75 @@ export class ScheduleService {
         projectId: before.projectId,
         summary:
           input.status && input.status !== before.status
-            ? `${user.name} marked “${before.title}” as ${input.status.toLowerCase()}`
-            : `${user.name} updated “${before.title}”`,
+            ? `${user.name} marked “${before.title}” as ${SHOOT_STATUS_LABELS[input.status].toLowerCase()}`
+            : moved
+              ? `${user.name} moved “${before.title}” to ${fmt(startsAt)}`
+              : `${user.name} updated “${before.title}”`,
+        metadata: moved
+          ? {
+              before: { startsAt: before.startsAt, endsAt: before.endsAt },
+              after: { startsAt, endsAt },
+            }
+          : undefined,
       });
     });
     this.activity.publish(row);
     return this.getShoot(id);
+  }
+
+  /**
+   * Shoot lifecycle: PLANNED → CONFIRMED → IN_PROGRESS → WRAPPED (CANCELLED from any open state).
+   * Confirming needs every blocking readiness item; starting also needs a published call sheet;
+   * a shoot cannot be wrapped before it has begun. Returns the timestamps to store.
+   */
+  private async assertStatusChange(
+    shoot: Shoot,
+    to: Shoot['status'],
+    window: { startsAt: Date; endsAt: Date },
+  ): Promise<Partial<Pick<Shoot, 'startedAt' | 'wrappedAt'>>> {
+    const from = shoot.status;
+    const allowed: Record<Shoot['status'], Shoot['status'][]> = {
+      PLANNED: ['CONFIRMED', 'CANCELLED'],
+      CONFIRMED: ['PLANNED', 'IN_PROGRESS', 'WRAPPED', 'CANCELLED'],
+      IN_PROGRESS: ['WRAPPED', 'CONFIRMED', 'CANCELLED'],
+      WRAPPED: ['IN_PROGRESS'],
+      CANCELLED: ['PLANNED'],
+    };
+    if (!allowed[from].includes(to)) {
+      throw unprocessable(
+        'INVALID_SHOOT_TRANSITION',
+        `A ${SHOOT_STATUS_LABELS[from].toLowerCase()} shoot cannot be marked ${SHOOT_STATUS_LABELS[to].toLowerCase()}.`,
+      );
+    }
+    if (to === 'CONFIRMED' || to === 'IN_PROGRESS') {
+      const check = await this.readiness.evaluate(shoot.id);
+      const missing = check.items.filter((i) => i.blocking && i.status === 'missing');
+      if (missing.length > 0) {
+        throw unprocessable(
+          'SHOOT_NOT_READY',
+          `“${shoot.title}” is not ready: ${missing.map((m) => m.label.toLowerCase()).join(', ')}.`,
+          { items: missing },
+        );
+      }
+      if (to === 'IN_PROGRESS' && !check.canStart) {
+        throw unprocessable(
+          'CALL_SHEET_NOT_PUBLISHED',
+          'Publish the call sheet before starting the shoot day.',
+        );
+      }
+    }
+    if (
+      (to === 'IN_PROGRESS' || to === 'WRAPPED') &&
+      window.startsAt.getTime() > Date.now() + 6 * 3600 * 1000
+    ) {
+      throw unprocessable(
+        'SHOOT_NOT_STARTED',
+        `“${shoot.title}” starts on ${fmt(window.startsAt)}; it cannot be ${to === 'WRAPPED' ? 'wrapped' : 'started'} yet.`,
+      );
+    }
+    if (to === 'IN_PROGRESS') return { startedAt: shoot.startedAt ?? new Date() };
+    if (to === 'WRAPPED') return { wrappedAt: new Date() };
+    return {};
   }
 
   /**
@@ -265,11 +346,34 @@ export class ScheduleService {
     ]);
     const isNew = (other: { startsAt: Date; endsAt: Date }) =>
       rangesOverlap(other, window) && (revived || !rangesOverlap(other, current));
+    const talent = await this.database.models.TalentBooking.find({
+      shootId,
+      status: { $ne: 'RELEASED' },
+    })
+      .populate({
+        path: 'talent',
+        populate: {
+          path: 'bookings',
+          match: { ...elsewhere, status: { $ne: 'RELEASED' } },
+          populate: { path: 'shoot', select: { startsAt: 1, endsAt: 1 } },
+        },
+      })
+      .lean<
+        (TalentBooking & {
+          talent: {
+            name: string;
+            bookings: (TalentBooking & { shoot: Pick<Shoot, 'startsAt' | 'endsAt'> | null })[];
+          };
+        })[]
+      >();
     return [
       ...bookings.filter((b) => b.asset.bookings.some(isNew)).map((b) => b.asset.name),
       ...calls
         .filter((c) => c.teamMember.crewCalls.some((o) => isNew(o.shoot)))
         .map((c) => c.teamMember.name),
+      ...talent
+        .filter((t) => t.talent.bookings.some((o) => o.shoot && isNew(o.shoot)))
+        .map((t) => t.talent.name),
     ];
   }
 

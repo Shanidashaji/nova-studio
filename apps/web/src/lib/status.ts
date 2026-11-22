@@ -51,6 +51,7 @@ export const approvalTone: Record<ApprovalStatus, Tone> = {
 export const shootTone: Record<ShootStatus, Tone> = {
   PLANNED: 'info',
   CONFIRMED: 'signal',
+  IN_PROGRESS: 'attention',
   WRAPPED: 'neutral',
   CANCELLED: 'neutral',
 };

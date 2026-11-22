@@ -20,7 +20,7 @@ async function openLens(page: Page, label: string) {
 test('the sidebar groups the ERP lenses inside one workspace', async ({ page }) => {
   await page.goto('/studio');
   const nav = page.getByRole('navigation', { name: 'Workspace lenses' });
-  for (const group of ['Operate', 'Business', 'Knowledge', 'Account']) {
+  for (const group of ['Operate', 'Production', 'Business', 'Knowledge', 'Account']) {
     await expect(nav.getByRole('group', { name: group })).toBeVisible();
   }
   for (const label of [
@@ -100,8 +100,8 @@ test('procurement, inventory and documents render live records', async ({ page }
   expect((await download).suggestedFilename()).toBe('woven-light-brief.md');
 });
 
-test('studios and leave live inside the existing Resources and Team lenses', async ({ page }) => {
-  await openLens(page, 'Resources');
+test('studios and leave live inside the existing Shoot Calendar and Team lenses', async ({ page }) => {
+  await openLens(page, 'Shoot Calendar');
   await expect(page.getByRole('heading', { name: 'Studios', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Studio A — Cyclorama' })).toBeVisible();
 

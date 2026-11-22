@@ -4,13 +4,18 @@ import {
   SearchQuery,
   STAGE_LABELS,
   TASK_STATUS_LABELS,
+  CREATIVE_KIND_LABELS,
+  SCRIPT_STATUS_LABELS,
+  TALENT_KIND_LABELS,
   type SearchResult,
+  type SessionUser,
 } from '@nova/shared';
-import { RequirePermissions } from '../../common/decorators';
+import { CurrentUser, RequirePermissions } from '../../common/decorators';
 import { ZodValidationPipe } from '../../common/zod-validation.pipe';
 import type {
   Client as ClientRow,
   Project as ProjectRow,
+  Script as ScriptDoc,
   ProjectStage,
   Shoot as ShootRow,
   StageDefinition,
@@ -29,9 +34,30 @@ export class SearchController {
   @RequirePermissions('workspace:read')
   async search(
     @Query(new ZodValidationPipe(SearchQuery)) { q }: SearchQuery,
+    @CurrentUser() user: SessionUser,
   ): Promise<SearchResult[]> {
     const contains = containsI(q);
-    const { Project, Task, Client, TeamMember, Asset, Shoot, Lead } = this.database.models;
+    const { Project, Task, Client, TeamMember, Asset, Shoot, Lead, Talent, Script, Document } =
+      this.database.models;
+    const canDocs = user.permissions.includes('document:read');
+    const canConfidential = user.permissions.includes('document:confidential');
+    const [talent, scripts, documents] = await Promise.all([
+      Talent.find({ $or: [{ name: contains }, { skills: contains }, { baseCity: contains }] })
+        .limit(4)
+        .lean(),
+      Script.find({ title: contains })
+        .limit(4)
+        .populate({ path: 'project', select: { title: 1 } })
+        .lean<(ScriptDoc & { project: Pick<ProjectRow, 'title'> | null })[]>(),
+      canDocs
+        ? Document.find({
+            $or: [{ title: contains }, { description: contains }],
+            ...(canConfidential ? {} : { confidential: false }),
+          })
+            .limit(4)
+            .lean()
+        : Promise.resolve([]),
+    ]);
     const [projects, tasks, clients, members, assets, shoots, leads] = await Promise.all([
       Project.find({ $or: [{ title: contains }, { code: contains }, { logline: contains }] })
         .limit(6)
@@ -122,6 +148,24 @@ export class SearchController {
         id: l.id,
         title: l.title,
         subtitle: `${PROJECT_TYPE_LABELS[l.projectType]} · ${l.stage.toLowerCase()}`,
+      })),
+      ...talent.map((t) => ({
+        type: 'talent' as const,
+        id: t._id,
+        title: t.name,
+        subtitle: `${TALENT_KIND_LABELS[t.kind]} · ${t.baseCity}${t.isActive ? '' : ' · archived'}`,
+      })),
+      ...scripts.map((s) => ({
+        type: 'script' as const,
+        id: s.id,
+        title: s.title,
+        subtitle: `${CREATIVE_KIND_LABELS[s.kind]} · ${s.project?.title ?? ''} · ${SCRIPT_STATUS_LABELS[s.status]}`,
+      })),
+      ...documents.map((d) => ({
+        type: 'document' as const,
+        id: d._id,
+        title: d.title,
+        subtitle: `Document · ${d.category.toLowerCase()}`,
       })),
     ];
   }

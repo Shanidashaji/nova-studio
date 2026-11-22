@@ -5,6 +5,9 @@ import { Dialog as D } from 'radix-ui';
 import {
   Building2,
   Camera,
+  FileText,
+  Drama,
+  FileStack,
   Clapperboard,
   CornerDownLeft,
   Crosshair,
@@ -35,6 +38,9 @@ const RESULT_ICON: Record<SearchResult['type'], LucideIcon> = {
   asset: Package,
   shoot: Camera,
   lead: Handshake,
+  talent: Drama,
+  script: FileText,
+  document: FileStack,
 };
 
 const ASK_EXAMPLES = [
@@ -135,7 +141,13 @@ function PaletteBody({ close }: { close: () => void }) {
                 key={`${r.type}:${r.id}`}
                 icon={RESULT_ICON[r.type]}
                 hint={r.subtitle}
-                onSelect={() => run(() => inspect({ type: r.type as InspectType, id: r.id }))}
+                onSelect={() =>
+                  run(() =>
+                    r.type === 'document'
+                      ? setLens('documents')
+                      : inspect({ type: r.type as InspectType, id: r.id }),
+                  )
+                }
               >
                 {r.title}
               </Item>

@@ -11,14 +11,21 @@ import type { StageKey } from '@nova/shared';
 export const LENSES = [
   'pulse',
   'productions',
-  'schedule',
+  'tasks',
   'people',
   'clients',
+  'comms',
+  'schedule',
+  'shootday',
+  'scripts',
+  'talent',
+  'post',
   'finance',
   'procurement',
   'inventory',
   'approvals',
   'documents',
+  'reports',
   'business',
   'activity',
   'settings',
@@ -41,6 +48,8 @@ export const INSPECT_TYPES = [
   'asset',
   'lead',
   'workflows',
+  'talent',
+  'script',
 ] as const;
 export type InspectType = (typeof INSPECT_TYPES)[number];
 export interface InspectRef {
@@ -60,6 +69,8 @@ interface WorkspaceState {
   /** Narrow screens show the context column as an overlay sheet. */
   contextOpen: boolean;
   paletteOpen: boolean;
+  /** Shoot shown on the shoot-day lens (null = today's first shoot). */
+  shootDayId: string | null;
 
   setLens: (lens: Lens) => void;
   setFocus: (focus: Focus | null) => void;
@@ -70,6 +81,8 @@ interface WorkspaceState {
   showNova: () => void;
   setContextOpen: (open: boolean) => void;
   setPaletteOpen: (open: boolean) => void;
+  /** Opens the shoot-day workspace on a shoot. */
+  openShootDay: (shootId: string | null) => void;
   hydrate: (state: Partial<Pick<WorkspaceState, 'lens' | 'focus' | 'stack'>>) => void;
 }
 
@@ -80,6 +93,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   contextMode: 'nova',
   contextOpen: false,
   paletteOpen: false,
+  shootDayId: null,
 
   setLens: (lens) => set({ lens }),
   setFocus: (focus) => set({ focus }),
@@ -110,6 +124,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   showNova: () => set({ contextMode: 'nova', contextOpen: true }),
   setContextOpen: (contextOpen) => set({ contextOpen }),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),
+  openShootDay: (shootDayId) => set({ lens: 'shootday', shootDayId }),
   hydrate: (state) =>
     set({
       ...state,

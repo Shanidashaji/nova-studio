@@ -46,6 +46,23 @@ import {
   StockMovementType,
   StudioBookingStatus,
   DocumentCategory,
+  TalentKind,
+  TalentBookingStatus,
+  CreativeKind,
+  ScriptStatus,
+  SceneStatus,
+  SceneSetting,
+  SceneTime,
+  BreakdownSource,
+  ShootLogKind,
+  FootageStatus,
+  InternalReviewStatus,
+  FeedbackSource,
+  MessageChannel,
+  MessageStatus,
+  MessageTrigger,
+  AutomationMode,
+  BudgetGroup,
 } from './enums';
 import { baseSchemaOptions, newId, touchUpdatedAt } from './plugins';
 import type * as T from './types';
@@ -940,12 +957,20 @@ export const TaskSchema = (() => {
       blockedReason: { type: String, default: null },
       completedAt: { type: Date, default: null },
       parentId: { type: String, default: null },
+      shootId: { type: String, default: null },
       createdAt: { type: Date, default: Date.now },
       updatedAt: { type: Date, default: Date.now },
     },
     baseSchemaOptions('tasks'),
   );
   touchUpdatedAt(schema);
+  schema.virtual('shoot', {
+    ref: 'Shoot',
+    localField: 'shootId',
+    foreignField: '_id',
+    justOne: true,
+  });
+  schema.index({ shootId: 1 });
   schema.index({ projectId: 1, status: 1 });
   schema.index({ assigneeId: 1, status: 1 });
   schema.index({ projectStageId: 1 });
@@ -1030,6 +1055,16 @@ export const DeliverableSchema = (() => {
       currentVersion: { type: Number, validate: integer, default: 0 },
       dueDate: { type: Date, default: null },
       previewImageUrl: { type: String, default: null },
+      editorId: { type: String, default: null },
+      editProgress: { type: Number, validate: integer, default: 0 },
+      internalReviewStatus: {
+        type: String,
+        enum: Object.values(InternalReviewStatus),
+        default: 'NOT_STARTED',
+      },
+      internalReviewNote: { type: String, default: null },
+      internalReviewedAt: { type: Date, default: null },
+      internalReviewedBy: { type: String, default: null },
       createdAt: { type: Date, default: Date.now },
       updatedAt: { type: Date, default: Date.now },
     },
@@ -1037,6 +1072,13 @@ export const DeliverableSchema = (() => {
   );
   touchUpdatedAt(schema);
   schema.index({ projectId: 1, status: 1 });
+  schema.index({ editorId: 1 });
+  schema.virtual('editor', {
+    ref: 'TeamMember',
+    localField: 'editorId',
+    foreignField: '_id',
+    justOne: true,
+  });
   schema.virtual('project', {
     ref: 'Project',
     localField: 'projectId',
@@ -1095,6 +1137,7 @@ export const FeedbackItemSchema = (() => {
       body: { type: String, required: true },
       author: { type: String, required: true },
       status: { type: String, enum: Object.values(FeedbackStatus), default: 'OPEN' },
+      source: { type: String, enum: Object.values(FeedbackSource), default: 'CLIENT' },
       createdAt: { type: Date, default: Date.now },
     },
     baseSchemaOptions('feedbackItems'),
@@ -1122,6 +1165,7 @@ export const ApprovalSchema = (() => {
       decidedAt: { type: Date, default: null },
       decidedBy: { type: String, default: null },
       note: { type: String, default: null },
+      dueAt: { type: Date, default: null },
     },
     baseSchemaOptions('approvals'),
   );
@@ -1156,6 +1200,29 @@ export const ShootSchema = (() => {
       callTime: { type: String, default: null },
       status: { type: String, enum: Object.values(ShootStatus), default: 'PLANNED' },
       notes: { type: String, default: null },
+      productionManagerId: { type: String, default: null },
+      crewCallTime: { type: String, default: null },
+      callSheetNotes: { type: String, default: null },
+      callSheetPublishedAt: { type: Date, default: null },
+      checklist: {
+        type: [
+          new Schema<T.ShootChecklistItem>(
+            {
+              _id: { type: String, default: newId },
+              label: { type: String, required: true },
+              done: { type: Boolean, default: false },
+              doneAt: { type: Date, default: null },
+              doneBy: { type: String, default: null },
+            },
+            { versionKey: false, toJSON: { virtuals: true }, toObject: { virtuals: true } },
+          ),
+        ],
+        default: [],
+      },
+      footageStatus: { type: String, enum: Object.values(FootageStatus), default: 'PENDING' },
+      wrapNotes: { type: String, default: null },
+      startedAt: { type: Date, default: null },
+      wrappedAt: { type: Date, default: null },
       createdAt: { type: Date, default: Date.now },
       updatedAt: { type: Date, default: Date.now },
     },
@@ -1188,6 +1255,31 @@ export const ShootSchema = (() => {
     foreignField: 'shootId',
     justOne: false,
   });
+  schema.virtual('talent', {
+    ref: 'TalentBooking',
+    localField: '_id',
+    foreignField: 'shootId',
+    justOne: false,
+  });
+  schema.virtual('scenes', {
+    ref: 'Scene',
+    localField: '_id',
+    foreignField: 'shootId',
+    justOne: false,
+  });
+  schema.virtual('log', {
+    ref: 'ShootLogEntry',
+    localField: '_id',
+    foreignField: 'shootId',
+    justOne: false,
+  });
+  schema.virtual('productionManager', {
+    ref: 'TeamMember',
+    localField: 'productionManagerId',
+    foreignField: '_id',
+    justOne: true,
+  });
+  schema.index({ productionManagerId: 1 });
   return schema;
 })();
 
@@ -1420,11 +1512,17 @@ export const NotificationSchema = (() => {
       entityType: { type: String, default: null },
       entityId: { type: String, default: null },
       readAt: { type: Date, default: null },
+      resolvedAt: { type: Date, default: null },
+      dedupeKey: { type: String, default: null },
       createdAt: { type: Date, default: Date.now },
     },
     baseSchemaOptions('notifications'),
   );
   schema.index({ userId: 1, readAt: 1 });
+  schema.index(
+    { userId: 1, dedupeKey: 1 },
+    { unique: true, partialFilterExpression: { dedupeKey: { $type: 'string' } } },
+  );
   schema.virtual('user', { ref: 'User', localField: 'userId', foreignField: '_id', justOne: true });
   return schema;
 })();
@@ -2564,6 +2662,281 @@ export const DocumentVersionSchema = (() => {
   return schema;
 })();
 
+// ── Production studio layer ──────────────────────────────────────────────────
+
+const virtual = (
+  schema: Schema,
+  name: string,
+  ref: string,
+  localField: string,
+  foreignField = '_id',
+  justOne = true,
+) => schema.virtual(name, { ref, localField, foreignField, justOne });
+
+export const TalentSchema = (() => {
+  const unavailable = new Schema<T.TalentUnavailability>(
+    {
+      _id: { type: String, default: newId },
+      from: { type: Date, required: true },
+      to: { type: Date, required: true },
+      reason: { type: String, default: null },
+    },
+    { versionKey: false, toJSON: { virtuals: true }, toObject: { virtuals: true } },
+  );
+  const schema = new Schema<T.Talent>(
+    {
+      _id: { type: String, default: newId },
+      name: { type: String, required: true },
+      kind: { type: String, enum: Object.values(TalentKind), required: true },
+      email: { type: String, default: null },
+      phone: { type: String, default: null },
+      agency: { type: String, default: null },
+      skills: { type: [String], default: [] },
+      languages: { type: [String], default: [] },
+      playingAgeMin: { type: Number, validate: integer, default: null },
+      playingAgeMax: { type: Number, validate: integer, default: null },
+      experienceYears: { type: Number, validate: integer, default: 0 },
+      baseCity: { type: String, required: true },
+      willTravel: { type: Boolean, default: true },
+      dayRate: { type: Number, validate: integer, required: true },
+      portfolioUrl: { type: String, default: null },
+      notes: { type: String, default: null },
+      isActive: { type: Boolean, default: true },
+      unavailable: { type: [unavailable], default: [] },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('talent'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ name: 1 });
+  schema.index({ kind: 1, isActive: 1 });
+  virtual(schema, 'bookings', 'TalentBooking', '_id', 'talentId', false);
+  return schema;
+})();
+
+export const TalentBookingSchema = (() => {
+  const schema = new Schema<T.TalentBooking>(
+    {
+      _id: { type: String, default: newId },
+      talentId: { type: String, required: true },
+      shootId: { type: String, required: true },
+      character: { type: String, required: true },
+      status: { type: String, enum: Object.values(TalentBookingStatus), default: 'HOLD' },
+      fee: { type: Number, validate: integer, default: 0 },
+      note: { type: String, default: null },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('talentBookings'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ shootId: 1, talentId: 1 }, { unique: true });
+  schema.index({ talentId: 1 });
+  virtual(schema, 'talent', 'Talent', 'talentId');
+  virtual(schema, 'shoot', 'Shoot', 'shootId');
+  return schema;
+})();
+
+export const ScriptSchema = (() => {
+  const schema = new Schema<T.Script>(
+    {
+      _id: { type: String, default: newId },
+      projectId: { type: String, required: true },
+      kind: { type: String, enum: Object.values(CreativeKind), default: 'SCRIPT' },
+      title: { type: String, required: true },
+      status: { type: String, enum: Object.values(ScriptStatus), default: 'DRAFT' },
+      currentVersion: { type: Number, validate: integer, default: 1 },
+      clientInstructions: { type: String, default: null },
+      notes: { type: String, default: null },
+      submittedAt: { type: Date, default: null },
+      decidedAt: { type: Date, default: null },
+      decidedBy: { type: String, default: null },
+      decisionNote: { type: String, default: null },
+      createdById: { type: String, required: true },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('scripts'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ projectId: 1, kind: 1 });
+  schema.index({ status: 1 });
+  virtual(schema, 'project', 'Project', 'projectId');
+  virtual(schema, 'createdBy', 'User', 'createdById');
+  virtual(schema, 'versions', 'ScriptVersion', '_id', 'scriptId', false);
+  virtual(schema, 'scenes', 'Scene', '_id', 'scriptId', false);
+  return schema;
+})();
+
+export const ScriptVersionSchema = (() => {
+  const schema = new Schema<T.ScriptVersion>(
+    {
+      _id: { type: String, default: newId },
+      scriptId: { type: String, required: true },
+      number: { type: Number, validate: integer, required: true },
+      body: { type: String, required: true },
+      changeNote: { type: String, default: null },
+      fileName: { type: String, default: null },
+      authorId: { type: String, required: true },
+      createdAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('scriptVersions'),
+  );
+  schema.index({ scriptId: 1, number: 1 }, { unique: true });
+  virtual(schema, 'script', 'Script', 'scriptId');
+  virtual(schema, 'author', 'User', 'authorId');
+  return schema;
+})();
+
+export const SceneSchema = (() => {
+  const schema = new Schema<T.Scene>(
+    {
+      _id: { type: String, default: newId },
+      projectId: { type: String, required: true },
+      scriptId: { type: String, default: null },
+      number: { type: String, required: true },
+      sortOrder: { type: Number, validate: integer, default: 0 },
+      heading: { type: String, required: true },
+      description: { type: String, default: null },
+      setting: { type: String, enum: Object.values(SceneSetting), default: 'INT' },
+      timeOfDay: { type: String, enum: Object.values(SceneTime), default: 'DAY' },
+      location: { type: String, default: null },
+      characters: { type: [String], default: [] },
+      props: { type: [String], default: [] },
+      wardrobe: { type: [String], default: [] },
+      equipment: { type: [String], default: [] },
+      requirements: { type: String, default: null },
+      estimatedMinutes: { type: Number, validate: integer, default: 60 },
+      shootId: { type: String, default: null },
+      shootDate: { type: Date, default: null },
+      plannedStart: { type: String, default: null },
+      status: { type: String, enum: Object.values(SceneStatus), default: 'PLANNED' },
+      notes: { type: String, default: null },
+      source: { type: String, enum: Object.values(BreakdownSource), default: 'MANUAL' },
+      completedAt: { type: Date, default: null },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('scenes'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ projectId: 1, sortOrder: 1 });
+  schema.index({ shootId: 1 });
+  schema.index({ scriptId: 1 });
+  virtual(schema, 'project', 'Project', 'projectId');
+  virtual(schema, 'script', 'Script', 'scriptId');
+  virtual(schema, 'shoot', 'Shoot', 'shootId');
+  return schema;
+})();
+
+export const ShootLogEntrySchema = (() => {
+  const schema = new Schema<T.ShootLogEntry>(
+    {
+      _id: { type: String, default: newId },
+      shootId: { type: String, required: true },
+      kind: { type: String, enum: Object.values(ShootLogKind), required: true },
+      body: { type: String, required: true },
+      minutesLost: { type: Number, validate: integer, default: 0 },
+      authorId: { type: String, required: true },
+      resolvedAt: { type: Date, default: null },
+      createdAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('shootLog'),
+  );
+  schema.index({ shootId: 1, createdAt: -1 });
+  virtual(schema, 'shoot', 'Shoot', 'shootId');
+  virtual(schema, 'author', 'User', 'authorId');
+  return schema;
+})();
+
+export const MessageTemplateSchema = (() => {
+  const schema = new Schema<T.MessageTemplate>(
+    {
+      _id: { type: String, default: newId },
+      trigger: { type: String, enum: Object.values(MessageTrigger), required: true },
+      name: { type: String, required: true },
+      channel: { type: String, enum: Object.values(MessageChannel), default: 'EMAIL' },
+      subject: { type: String, required: true },
+      body: { type: String, required: true },
+      mode: { type: String, enum: Object.values(AutomationMode), default: 'DRAFT' },
+      offsetHours: { type: Number, validate: integer, default: 0 },
+      updatedById: { type: String, default: null },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('messageTemplates'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ trigger: 1 }, { unique: true });
+  return schema;
+})();
+
+export const ClientMessageSchema = (() => {
+  const schema = new Schema<T.ClientMessage>(
+    {
+      _id: { type: String, default: newId },
+      clientId: { type: String, required: true },
+      projectId: { type: String, default: null },
+      shootId: { type: String, default: null },
+      templateId: { type: String, default: null },
+      trigger: { type: String, enum: Object.values(MessageTrigger), required: true },
+      channel: { type: String, enum: Object.values(MessageChannel), default: 'EMAIL' },
+      recipientName: { type: String, required: true },
+      recipientAddress: { type: String, default: null },
+      subject: { type: String, required: true },
+      body: { type: String, required: true },
+      status: { type: String, enum: Object.values(MessageStatus), default: 'DRAFT' },
+      scheduledFor: { type: Date, default: null },
+      sentAt: { type: Date, default: null },
+      statusNote: { type: String, default: null },
+      provider: { type: String, default: null },
+      dedupeKey: { type: String, default: null },
+      scheduleStamp: { type: Date, default: null },
+      createdById: { type: String, default: null },
+      reviewedById: { type: String, default: null },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('clientMessages'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ createdAt: -1 });
+  schema.index({ status: 1, scheduledFor: 1 });
+  schema.index({ clientId: 1, createdAt: -1 });
+  schema.index({ projectId: 1 });
+  schema.index({ shootId: 1 });
+  schema.index(
+    { dedupeKey: 1 },
+    { unique: true, partialFilterExpression: { dedupeKey: { $type: 'string' } } },
+  );
+  virtual(schema, 'client', 'Client', 'clientId');
+  virtual(schema, 'project', 'Project', 'projectId');
+  virtual(schema, 'shoot', 'Shoot', 'shootId');
+  virtual(schema, 'template', 'MessageTemplate', 'templateId');
+  return schema;
+})();
+
+export const BudgetLineSchema = (() => {
+  const schema = new Schema<T.BudgetLine>(
+    {
+      _id: { type: String, default: newId },
+      projectId: { type: String, required: true },
+      group: { type: String, enum: Object.values(BudgetGroup), required: true },
+      label: { type: String, required: true },
+      estimated: { type: Number, validate: integer, required: true },
+      note: { type: String, default: null },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now },
+    },
+    baseSchemaOptions('budgetLines'),
+  );
+  touchUpdatedAt(schema);
+  schema.index({ projectId: 1, group: 1 });
+  virtual(schema, 'project', 'Project', 'projectId');
+  return schema;
+})();
+
 export const SCHEMAS = {
   User: UserSchema,
   Session: SessionSchema,
@@ -2623,4 +2996,13 @@ export const SCHEMAS = {
   StudioBooking: StudioBookingSchema,
   Document: DocumentSchema,
   DocumentVersion: DocumentVersionSchema,
+  Talent: TalentSchema,
+  TalentBooking: TalentBookingSchema,
+  Script: ScriptSchema,
+  ScriptVersion: ScriptVersionSchema,
+  Scene: SceneSchema,
+  ShootLogEntry: ShootLogEntrySchema,
+  MessageTemplate: MessageTemplateSchema,
+  ClientMessage: ClientMessageSchema,
+  BudgetLine: BudgetLineSchema,
 } as const;

@@ -59,6 +59,13 @@ export class TasksService {
       throw unprocessable('INVALID_MEMBER', 'Choose an existing team member.');
     if (assignee && !assignee.isActive)
       throw unprocessable('MEMBER_INACTIVE', `${assignee.name} is no longer on the team.`);
+    if (input.shootId) {
+      const shoot = await this.database.models.Shoot.findById(input.shootId, {
+        projectId: 1,
+      }).lean();
+      if (!shoot || shoot.projectId !== project.id)
+        throw unprocessable('INVALID_SHOOT', 'The shoot must belong to the same project.');
+    }
     if (input.parentId) {
       const parent = await Task.findById(input.parentId).lean<Task>();
       if (!parent || parent.projectId !== project.id)
@@ -122,6 +129,13 @@ export class TasksService {
     if (input.assigneeId) {
       const member = await TeamMember.findById(input.assigneeId).lean();
       if (!member) throw unprocessable('INVALID_MEMBER', 'Choose an existing team member.');
+    }
+    if (input.shootId) {
+      const shoot = await this.database.models.Shoot.findById(input.shootId, {
+        projectId: 1,
+      }).lean();
+      if (!shoot || shoot.projectId !== before.projectId)
+        throw unprocessable('INVALID_SHOOT', 'The shoot must belong to the same project.');
     }
 
     const statusChanged = input.status && input.status !== before.status;

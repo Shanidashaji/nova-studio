@@ -49,6 +49,18 @@ export class ReviewsService {
     if (d.status === 'DELIVERED' || d.status === 'APPROVED') {
       throw conflict('ALREADY_APPROVED', `${d.name} is already approved.`);
     }
+    // Internal review comes before the client: a cut still in (or sent back by) internal review
+    // must not reach the client.
+    if ((d.internalReviewStatus ?? 'NOT_STARTED') !== 'APPROVED') {
+      throw conflict(
+        'INTERNAL_REVIEW_OPEN',
+        d.internalReviewStatus === 'PENDING'
+          ? `${d.name} is waiting for internal review. Approve it internally before sending it to the client.`
+          : d.internalReviewStatus === 'CHANGES_REQUESTED'
+            ? `Internal review asked for changes on ${d.name}. Address them and pass internal review first.`
+            : `${d.name} has not been through internal review. Request and pass it before the client sees this cut.`,
+      );
+    }
     if (d.approvals.length > 0) {
       throw conflict(
         'REVIEW_PENDING',
@@ -81,6 +93,7 @@ export class ReviewsService {
         projectStageId: reviewStage?.id ?? null,
         title: `Client approval — ${d.name} v${version}`,
         note: input.note,
+        dueAt: input.dueAt ?? new Date(Date.now() + 3 * 24 * 3600 * 1000),
       });
       return this.activity.record({
         actorId: user.id,
@@ -135,7 +148,15 @@ export class ReviewsService {
       if (approval.deliverableId) {
         const updated = await Deliverable.updateOne(
           { _id: approval.deliverableId },
-          { $set: { status: input.status === 'APPROVED' ? 'APPROVED' : 'CHANGES_REQUESTED' } },
+          {
+            $set: {
+              status: input.status === 'APPROVED' ? 'APPROVED' : 'CHANGES_REQUESTED',
+              // The next cut goes through internal review again before the client sees it.
+              ...(input.status === 'APPROVED'
+                ? {}
+                : { internalReviewStatus: 'NOT_STARTED', editProgress: 50 }),
+            },
+          },
         );
         if (updated.matchedCount === 0) throw notFound('Deliverable');
         await RevisionRound.updateMany(
@@ -252,7 +273,7 @@ export class ReviewsService {
         entityType: 'deliverable',
         entityId: deliverableId,
         projectId: round.deliverable.projectId,
-        summary: `${input.author} left feedback on ${round.deliverable.name} v${round.number}${item.timecode ? ` at ${item.timecode}` : ''}`,
+        summary: `${input.author} left ${input.source === 'INTERNAL' ? 'internal review notes' : 'feedback'} on ${round.deliverable.name} v${round.number}${item.timecode ? ` at ${item.timecode}` : ''}`,
       });
     });
     this.activity.publish(row);

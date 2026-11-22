@@ -14,6 +14,7 @@ import { PERMISSIONS, SEED_ROLES, SUPER_ADMIN_ROLE } from '@nova/shared';
 import { connectDatabase } from '../database';
 import { hashPassword } from '../password';
 import { buildErpWorld } from './erp';
+import { buildStudioWorld } from './studio';
 import { buildDemoWorld } from './world';
 
 config({ path: path.resolve(__dirname, '../../../../.env'), quiet: true });
@@ -102,8 +103,14 @@ async function main() {
       creativeUserId: extraUsers.get('CREATIVE')!,
     });
 
+    const studioCounts = await buildStudioWorld(db, {
+      adminId: admin._id,
+      producerUserId: extraUsers.get('PRODUCTION_MANAGER')!,
+      creativeUserId: extraUsers.get('CREATIVE')!,
+    });
+
     console.log('\nNOVA demo data seeded:');
-    console.table({ ...counts, ...erpCounts });
+    console.table({ ...counts, ...erpCounts, ...studioCounts });
     console.log(`Administrator: ${adminEmail} (password from SEED_ADMIN_PASSWORD)`);
     console.log('Demo accounts (passwords are regenerated on every seed):');
     console.table(demoPasswords);

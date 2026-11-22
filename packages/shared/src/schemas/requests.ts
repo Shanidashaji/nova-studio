@@ -96,6 +96,8 @@ export const CreateTask = z.object({
   isStageBlocking: z.boolean().default(false),
   /** Makes this a subtask (one level deep). */
   parentId: optionalId,
+  /** The shoot this task prepares for or follows up (same project). */
+  shootId: optionalId,
 });
 export type CreateTask = z.infer<typeof CreateTask>;
 
@@ -110,6 +112,7 @@ export const UpdateTask = z
     estimateHours: z.coerce.number().int().min(0).max(200).nullable(),
     isStageBlocking: z.boolean(),
     blockedReason: optionalText(300),
+    shootId: Id.nullable(),
   })
   .partial();
 export type UpdateTask = z.infer<typeof UpdateTask>;
@@ -119,7 +122,11 @@ export type AddDependency = z.infer<typeof AddDependency>;
 
 // ── Deliverables & approvals ──────────────────────────────────────────────────
 
-export const SendForReview = z.object({ note: optionalText(300) });
+export const SendForReview = z.object({
+  note: optionalText(300),
+  /** Review deadline for the client (default: three days). */
+  dueAt: optionalDate,
+});
 export type SendForReview = z.infer<typeof SendForReview>;
 
 export const ApprovalDecision = z.object({
@@ -136,6 +143,8 @@ export const AddFeedback = z.object({
     .optional(),
   body: text(1000),
   author: text(120),
+  /** Client note or internal review note. */
+  source: z.enum(['CLIENT', 'INTERNAL']).default('CLIENT'),
 });
 export type AddFeedback = z.infer<typeof AddFeedback>;
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { SHOOT_STATUSES, type ShootView } from '@nova/shared';
-import { MapPin, Plus, TriangleAlert, X } from 'lucide-react';
+import { Film, MapPin, Plus, TriangleAlert, X } from 'lucide-react';
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -32,6 +32,7 @@ export function ShootInspector({ id }: { id: string }) {
 function ShootBody({ s }: { s: ShootView }) {
   const canWrite = useCan('schedule:write');
   const inspect = useWorkspace((st) => st.inspect);
+  const openShootDay = useWorkspace((st) => st.openShootDay);
   const team = useTeam();
   const assets = useAssets();
   const [member, setMember] = useState('');
@@ -104,6 +105,15 @@ function ShootBody({ s }: { s: ShootView }) {
         <p className="mt-1 flex items-center gap-1 text-sm text-text-2">
           <MapPin className="size-3.5" /> {s.location}
         </p>
+        <p className="mt-1 text-xs text-text-3">
+          {s.dayCount > 1 ? `${s.dayCount}-day shoot · ` : ''}
+          {s.talent.length} artist(s)
+          {s.productionManager ? ` · PM ${s.productionManager.name}` : ''}
+          {s.callSheetPublishedAt ? ' · call sheet published' : ' · call sheet not published'}
+        </p>
+        <Button size="sm" variant="secondary" className="mt-2" onClick={() => openShootDay(s.id)}>
+          <Film /> Open shoot-day workspace
+        </Button>
         <div className="mt-2 flex items-center gap-2">
           <Badge tone={shootTone[s.status]}>{titleCase(s.status)}</Badge>
           {canWrite ? (

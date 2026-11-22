@@ -15,6 +15,7 @@ passed and the feature was exercised in the running app. Plan and gap analysis:
 | 12    | HR (departments, restricted records, attendance, leave through approval; leave blocks crew calls) and studio bookings with conflict refusal                                                            | Done                                                          |
 | 13    | Documents (private versioned storage), CRM (contacts, owner/follow-up, lead conversion), milestones, risks, subtasks                                                                                   | Done                                                          |
 | 14    | ERP signals in the Pulse attention queue, NOVA AI tools for the new modules, analytics additions, screenshots                                                                                          | **Not started**                                               |
+| 15    | Production-studio layer ([ADR-0015](docs/decisions/0015-production-studio-layer.md)): command centre, shoot calendar views, shoot day, artists, scripts and breakdown, recommendations, pre/post-production, client comms automation, budget plans, task board, capacity and reports, smart alerts, assistant tools | Done (2026-11-22, see `STUDIO_UPGRADE_REPORT.md`)             |
 
 ## What is implemented where
 

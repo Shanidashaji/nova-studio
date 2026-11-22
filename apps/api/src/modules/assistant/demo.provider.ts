@@ -7,6 +7,7 @@ import {
   parseTaskStatus,
 } from '@nova/shared';
 import { AssistantTools } from './assistant.tools';
+import { StudioTools } from './studio.tools';
 import type {
   AssistantContext,
   AssistantProvider,
@@ -35,7 +36,10 @@ const reply = (r: ToolResult, intro: string, suggestions: string[]): DemoReply =
 export class DemoProvider implements AssistantProvider {
   readonly name = 'demo' as const;
 
-  constructor(private readonly tools: AssistantTools) {}
+  constructor(
+    private readonly tools: AssistantTools,
+    private readonly studio: StudioTools,
+  ) {}
 
   private readonly intents: Intent[] = [
     // ── Changes (always proposals) ──────────────────────────────────────────
@@ -144,6 +148,62 @@ export class DemoProvider implements AssistantProvider {
       },
     },
     // ── Questions ───────────────────────────────────────────────────────────
+    {
+      test: /\b(focus on|what should|morning brief|plan (for )?(my|the) day)\b/,
+      run: async (_msg, ctx) =>
+        reply(await this.studio.focus(ctx), '', [
+          'Which shoots are scheduled today?',
+          'Which tasks are overdue?',
+        ]),
+    },
+    {
+      test: /\b(shoots?|shooting|filming)\b.*\btoday\b|\btoday'?s shoots?\b/,
+      run: async () =>
+        reply(await this.studio.shootsToday(), '', [
+          'Which crew members are available?',
+          'Do any shoots have scheduling conflicts?',
+        ]),
+    },
+    {
+      test: /\b(artists?|actors?|talent|models?|cast)\b.*\b(available|free)\b|\b(available|free)\b.*\b(artists?|actors?|talent|models?)\b/,
+      run: async (msg) =>
+        reply(await this.studio.availability('talent', /\btomorrow\b/i.test(msg) ? 1 : 0), '', [
+          'Which crew members are available?',
+          'Which shoots are scheduled today?',
+        ]),
+    },
+    {
+      test: /\bcrew\b.*\b(available|free)\b|\b(available|free)\b.*\bcrew\b/,
+      run: async (msg) =>
+        reply(await this.studio.availability('crew', /\btomorrow\b/i.test(msg) ? 1 : 0), '', [
+          'Which artists are available?',
+          'Show the workload of the team',
+        ]),
+    },
+    {
+      test: /\b(conflicts?|double.?book\w*|clash\w*|overlap\w*)\b/,
+      run: async () =>
+        reply(await this.studio.conflicts(), '', [
+          'Which shoots are scheduled today?',
+          'What should the studio manager focus on today?',
+        ]),
+    },
+    {
+      test: /\boverdue\b.*\btasks?\b|\btasks?\b.*\boverdue\b/,
+      run: async () =>
+        reply(await this.studio.overdueTasks(), '', [
+          'Which workflows are blocked?',
+          'Which projects are delayed?',
+        ]),
+    },
+    {
+      test: /\bscripts?\b.*\b(approv\w*|review|waiting|pending)\b|\b(approv\w*|pending)\b.*\bscripts?\b/,
+      run: async () =>
+        reply(await this.studio.scriptApprovals(), 'Scripts waiting for approval:', [
+          'Which approvals are waiting?',
+          'Which projects are at risk?',
+        ]),
+    },
     {
       test: /\b(attention|today|priorit|focus on|urgent|first)\b/,
       run: async (_msg, ctx) =>
@@ -308,6 +368,11 @@ export class DemoProvider implements AssistantProvider {
 const EN = { code: 'en', source: 'model' } as const;
 
 const DEMO_SUGGESTIONS = [
+  'What should the studio manager focus on today?',
+  'Which shoots are scheduled today?',
+  'Which artists are available?',
+  'Do any shoots have scheduling conflicts?',
+  'Which tasks are overdue?',
   'What needs my attention today?',
   'Which projects are delayed?',
   'Which workflows are blocked?',

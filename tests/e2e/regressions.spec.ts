@@ -86,7 +86,7 @@ test('the command palette offers hotkey hints only for lenses that have one', as
   await page.keyboard.press('Control+k');
   const palette = page.getByRole('dialog', { name: 'Command palette' });
   await expect(palette).toBeVisible();
-  // Thirteen lenses, hotkeys 1–9: Settings is the thirteenth and must not claim a key.
-  await expect(palette.getByRole('option', { name: /^Settings/ })).not.toContainText(/1[0-3]/);
-  await expect(palette.getByRole('option', { name: /^Home/ })).toContainText('1');
+  // Twenty lenses, hotkeys 1–9: Settings is the last and must not claim a key.
+  await expect(palette.getByRole('option', { name: /^Settings/ })).not.toContainText(/(1\d|20)/);
+  await expect(palette.getByRole('option', { name: /^Command Center/ })).toContainText('1');
 });

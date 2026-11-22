@@ -149,6 +149,7 @@ export type ApprovalStatus = (typeof ApprovalStatus)[keyof typeof ApprovalStatus
 export const ShootStatus = {
   PLANNED: 'PLANNED',
   CONFIRMED: 'CONFIRMED',
+  IN_PROGRESS: 'IN_PROGRESS',
   WRAPPED: 'WRAPPED',
   CANCELLED: 'CANCELLED',
 } as const;
@@ -209,6 +210,7 @@ export const FinanceCategory = {
   CONSUMABLES: 'CONSUMABLES',
   POST_PRODUCTION: 'POST_PRODUCTION',
   MAINTENANCE: 'MAINTENANCE',
+  TALENT: 'TALENT',
 } as const;
 export type FinanceCategory = (typeof FinanceCategory)[keyof typeof FinanceCategory];
 
@@ -402,3 +404,152 @@ export const DocumentCategory = {
   OTHER: 'OTHER',
 } as const;
 export type DocumentCategory = (typeof DocumentCategory)[keyof typeof DocumentCategory];
+
+// ── Production studio layer (mirrors packages/shared/src/constants/studio-enums.ts) ──
+
+export const TalentKind = {
+  ACTOR: 'ACTOR',
+  MODEL: 'MODEL',
+  VOICE_ARTIST: 'VOICE_ARTIST',
+  ANCHOR: 'ANCHOR',
+  DANCER: 'DANCER',
+  INFLUENCER: 'INFLUENCER',
+  CHILD_ARTIST: 'CHILD_ARTIST',
+  OTHER: 'OTHER',
+} as const;
+export type TalentKind = (typeof TalentKind)[keyof typeof TalentKind];
+
+export const TalentBookingStatus = {
+  HOLD: 'HOLD',
+  CONFIRMED: 'CONFIRMED',
+  RELEASED: 'RELEASED',
+} as const;
+export type TalentBookingStatus = (typeof TalentBookingStatus)[keyof typeof TalentBookingStatus];
+
+export const CreativeKind = {
+  BRIEF: 'BRIEF',
+  CONCEPT: 'CONCEPT',
+  SCRIPT: 'SCRIPT',
+  STORYBOARD: 'STORYBOARD',
+  SHOT_LIST: 'SHOT_LIST',
+} as const;
+export type CreativeKind = (typeof CreativeKind)[keyof typeof CreativeKind];
+
+export const ScriptStatus = {
+  DRAFT: 'DRAFT',
+  IN_REVIEW: 'IN_REVIEW',
+  CHANGES_REQUESTED: 'CHANGES_REQUESTED',
+  APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED',
+} as const;
+export type ScriptStatus = (typeof ScriptStatus)[keyof typeof ScriptStatus];
+
+export const SceneStatus = {
+  PLANNED: 'PLANNED',
+  SCHEDULED: 'SCHEDULED',
+  SHOT: 'SHOT',
+  DROPPED: 'DROPPED',
+} as const;
+export type SceneStatus = (typeof SceneStatus)[keyof typeof SceneStatus];
+
+export const SceneSetting = {
+  INT: 'INT',
+  EXT: 'EXT',
+  INT_EXT: 'INT_EXT',
+} as const;
+export type SceneSetting = (typeof SceneSetting)[keyof typeof SceneSetting];
+
+export const SceneTime = {
+  DAY: 'DAY',
+  NIGHT: 'NIGHT',
+  DAWN: 'DAWN',
+  DUSK: 'DUSK',
+} as const;
+export type SceneTime = (typeof SceneTime)[keyof typeof SceneTime];
+
+export const BreakdownSource = {
+  MANUAL: 'MANUAL',
+  RULE_BASED: 'RULE_BASED',
+} as const;
+export type BreakdownSource = (typeof BreakdownSource)[keyof typeof BreakdownSource];
+
+export const ShootLogKind = {
+  NOTE: 'NOTE',
+  ISSUE: 'ISSUE',
+  DELAY: 'DELAY',
+  SCHEDULE_CHANGE: 'SCHEDULE_CHANGE',
+} as const;
+export type ShootLogKind = (typeof ShootLogKind)[keyof typeof ShootLogKind];
+
+export const FootageStatus = {
+  PENDING: 'PENDING',
+  INGESTED: 'INGESTED',
+  BACKED_UP: 'BACKED_UP',
+  WITH_EDITOR: 'WITH_EDITOR',
+} as const;
+export type FootageStatus = (typeof FootageStatus)[keyof typeof FootageStatus];
+
+export const InternalReviewStatus = {
+  NOT_STARTED: 'NOT_STARTED',
+  PENDING: 'PENDING',
+  APPROVED: 'APPROVED',
+  CHANGES_REQUESTED: 'CHANGES_REQUESTED',
+} as const;
+export type InternalReviewStatus = (typeof InternalReviewStatus)[keyof typeof InternalReviewStatus];
+
+export const FeedbackSource = {
+  CLIENT: 'CLIENT',
+  INTERNAL: 'INTERNAL',
+} as const;
+export type FeedbackSource = (typeof FeedbackSource)[keyof typeof FeedbackSource];
+
+export const MessageChannel = {
+  EMAIL: 'EMAIL',
+  WHATSAPP: 'WHATSAPP',
+} as const;
+export type MessageChannel = (typeof MessageChannel)[keyof typeof MessageChannel];
+
+export const MessageStatus = {
+  DRAFT: 'DRAFT',
+  QUEUED: 'QUEUED',
+  SIMULATED: 'SIMULATED',
+  SENT: 'SENT',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED',
+} as const;
+export type MessageStatus = (typeof MessageStatus)[keyof typeof MessageStatus];
+
+export const MessageTrigger = {
+  PROJECT_CONFIRMED: 'PROJECT_CONFIRMED',
+  SHOOT_CONFIRMED: 'SHOOT_CONFIRMED',
+  PRE_SHOOT_INSTRUCTIONS: 'PRE_SHOOT_INSTRUCTIONS',
+  SHOOT_REMINDER: 'SHOOT_REMINDER',
+  SCHEDULE_CHANGED: 'SCHEDULE_CHANGED',
+  SHOOT_UPDATE: 'SHOOT_UPDATE',
+  SCRIPT_REVIEW: 'SCRIPT_REVIEW',
+  APPROVAL_REQUEST: 'APPROVAL_REQUEST',
+  EDITING_UPDATE: 'EDITING_UPDATE',
+  VIDEO_REVIEW: 'VIDEO_REVIEW',
+  REVISION_RECEIVED: 'REVISION_RECEIVED',
+  FINAL_DELIVERY: 'FINAL_DELIVERY',
+  FEEDBACK_REQUEST: 'FEEDBACK_REQUEST',
+  MANUAL: 'MANUAL',
+} as const;
+export type MessageTrigger = (typeof MessageTrigger)[keyof typeof MessageTrigger];
+
+export const AutomationMode = {
+  OFF: 'OFF',
+  DRAFT: 'DRAFT',
+  AUTO: 'AUTO',
+} as const;
+export type AutomationMode = (typeof AutomationMode)[keyof typeof AutomationMode];
+
+export const BudgetGroup = {
+  PRODUCTION: 'PRODUCTION',
+  CREW: 'CREW',
+  ARTIST: 'ARTIST',
+  EQUIPMENT: 'EQUIPMENT',
+  POST_PRODUCTION: 'POST_PRODUCTION',
+  OTHER: 'OTHER',
+} as const;
+export type BudgetGroup = (typeof BudgetGroup)[keyof typeof BudgetGroup];

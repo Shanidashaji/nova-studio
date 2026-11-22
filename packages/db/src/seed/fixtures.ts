@@ -941,11 +941,11 @@ export const SHOOTS: {
   },
   {
     project: 'brightpath-stories',
-    title: 'Pick-up interviews',
+    title: 'Campus stories — three-day block',
     location: 'BrightPath campus, Adyar (demo)',
     city: 'CHENNAI',
     dayOffset: 7,
-    days: 1,
+    days: 3,
     startHour: 9,
     endHour: 15,
     callTime: '08:30',

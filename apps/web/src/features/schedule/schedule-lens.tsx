@@ -14,7 +14,7 @@ import {
 import { useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Tooltip } from '@/components/ui/misc';
+import { Segmented, Tooltip } from '@/components/ui/misc';
 import { Panel, PanelState } from '@/components/ui/panel';
 import { useFocusFilter } from '@/features/shell/use-focus';
 import { useCan } from '@/features/shell/user-context';
@@ -23,6 +23,7 @@ import { useSchedule } from '@/lib/queries';
 import { shootTone } from '@/lib/status';
 import { cn } from '@/lib/utils';
 import { useWorkspace } from '@/store/workspace';
+import { ShootCalendar, type CalendarView } from './calendar-views';
 import { NewShootDialog } from './new-shoot-dialog';
 import { StudiosPanel } from './studios-panel';
 
@@ -45,6 +46,39 @@ function windowStart(weeks: number) {
 }
 
 export function ScheduleLens() {
+  const [view, setView] = useState<'board' | CalendarView>('week');
+  const canSchedule = useCan('schedule:write');
+  const [creating, setCreating] = useState(false);
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Segmented
+          label="Calendar view"
+          value={view}
+          onChange={setView}
+          options={[
+            { value: 'day', label: 'Day' },
+            { value: 'week', label: 'Week' },
+            { value: 'month', label: 'Month' },
+            { value: 'timeline', label: 'Timeline' },
+            { value: 'board', label: 'Call sheets & equipment' },
+          ]}
+        />
+        {canSchedule && view !== 'board' ? (
+          <Button variant="primary" className="ml-auto" onClick={() => setCreating(true)}>
+            <Plus /> Schedule a shoot
+          </Button>
+        ) : null}
+      </div>
+      {view === 'board' ? <ResourceBoard /> : <ShootCalendar view={view} />}
+      {view !== 'board' ? <StudiosPanel /> : null}
+      <NewShootDialog open={creating} onOpenChange={setCreating} />
+    </div>
+  );
+}
+
+/** Three-week window of call sheets with the equipment grid (the original resources view). */
+function ResourceBoard() {
   /** Weeks the window is shifted from today (0 = the window around today). */
   const [weeks, setWeeks] = useState(0);
   const from = useMemo(() => windowStart(weeks), [weeks]);

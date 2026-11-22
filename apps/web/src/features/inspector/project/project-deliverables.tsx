@@ -7,7 +7,7 @@ import { Still } from '@/components/still';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
-import { Field, Input, Textarea } from '@/components/ui/field';
+import { Field, Input, Select, Textarea } from '@/components/ui/field';
 import { useCan } from '@/features/shell/user-context';
 import { ago, date, duration, titleCase } from '@/lib/format';
 import { useApiMutation } from '@/lib/mutations';
@@ -52,7 +52,14 @@ function DeliverableBlock({ d, p }: { d: DeliverableView; p: ProjectDetail }) {
     !pending &&
     d.status !== 'APPROVED' &&
     d.status !== 'DELIVERED' &&
-    d.status !== 'PLANNED';
+    d.status !== 'PLANNED' &&
+    d.internalReviewStatus === 'APPROVED';
+  const internalLabel = {
+    NOT_STARTED: 'Internal review not started',
+    PENDING: 'In internal review',
+    APPROVED: 'Passed internal review',
+    CHANGES_REQUESTED: 'Internal changes requested',
+  }[d.internalReviewStatus];
   const ratio = d.aspectRatio === '9:16' ? '9 / 16' : d.aspectRatio === '1:1' ? '1 / 1' : '16 / 9';
 
   return (
@@ -82,6 +89,19 @@ function DeliverableBlock({ d, p }: { d: DeliverableView; p: ProjectDetail }) {
               : ''}
             {beyond > 0 ? <span className="text-critical"> · {beyond} beyond scope</span> : null}
           </p>
+          {d.status !== 'APPROVED' && d.status !== 'DELIVERED' && d.status !== 'PLANNED' ? (
+            <p className="mt-0.5 text-2xs text-text-3">
+              {d.editor ? `Editor ${d.editor.name} · ${d.editProgress}% · ` : ''}
+              <span
+                className={d.internalReviewStatus === 'APPROVED' ? 'text-signal' : 'text-attention'}
+              >
+                {internalLabel}
+              </span>
+              {d.internalReviewStatus !== 'APPROVED' && !pending
+                ? ' — pass it in Post & Reviews before sending to the client'
+                : ''}
+            </p>
+          ) : null}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {canSend ? (
               <Button size="sm" loading={send.isPending} onClick={() => send.mutate()}>
@@ -147,6 +167,7 @@ function FeedbackRow({
       >
         {f.body}
         <span className="block text-[10px] text-text-3 no-underline">
+          {f.source === 'INTERNAL' ? 'Internal · ' : 'Client · '}
           {f.author} · {ago(f.createdAt)}
         </span>
       </span>
@@ -188,6 +209,13 @@ function ApprovalRow({ approval: a }: { approval: ApprovalView }) {
       </div>
       <p className="text-2xs text-text-3">
         Requested {date(a.requestedAt, { weekday: 'short', day: 'numeric', month: 'short' })}
+        {a.dueAt ? (
+          <span className={a.overdue ? 'font-medium text-critical' : undefined}>
+            {' '}
+            · review due {date(a.dueAt, { weekday: 'short', day: 'numeric', month: 'short' })}
+            {a.overdue ? ' — overdue' : ''}
+          </span>
+        ) : null}
       </p>
       {canDecide ? (
         mode ? (
@@ -244,8 +272,9 @@ function FeedbackDialog({
   const [timecode, setTimecode] = useState('');
   const [body, setBody] = useState('');
   const [author, setAuthor] = useState(contact);
+  const [source, setSource] = useState<'CLIENT' | 'INTERNAL'>('CLIENT');
   const add = useApiMutation<void>('POST', `/deliverables/${deliverable.id}/feedback`, {
-    transform: () => ({ timecode: timecode || undefined, body, author }),
+    transform: () => ({ timecode: timecode || undefined, body, author, source }),
     success: 'Feedback logged',
     onSuccess: () => {
       setTimecode('');
@@ -293,6 +322,18 @@ function FeedbackDialog({
         </Field>
         <Field label="From">
           {(f) => <Input {...f} value={author} onChange={(e) => setAuthor(e.target.value)} />}
+        </Field>
+        <Field label="Feedback from" className="sm:col-span-2">
+          {(f) => (
+            <Select
+              {...f}
+              value={source}
+              onChange={(e) => setSource(e.target.value as 'CLIENT' | 'INTERNAL')}
+            >
+              <option value="CLIENT">The client</option>
+              <option value="INTERNAL">Internal review (studio)</option>
+            </Select>
+          )}
         </Field>
         <Field label="Note" className="sm:col-span-2">
           {(f) => (

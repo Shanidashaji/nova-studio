@@ -3,6 +3,7 @@
 import { ActiveProjects } from './active-projects';
 import { AttentionQueue } from './attention-queue';
 import { BusinessGlance } from './business-glance';
+import { CommandCenter } from './command-center';
 import { TeamCapacity } from './team-capacity';
 import { UpcomingShoots } from './upcoming-shoots';
 
@@ -14,6 +15,7 @@ import { UpcomingShoots } from './upcoming-shoots';
 export function PulseLens() {
   return (
     <div className="flex flex-col gap-4 2xl:pr-24">
+      <CommandCenter />
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
         <ActiveProjects />
         {/* On wide screens the queue takes the projects' height and scrolls inside it. */}

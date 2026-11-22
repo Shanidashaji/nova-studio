@@ -30,9 +30,16 @@ test('login page', async ({ browser }) => {
 
 /** Every lens, opened by its URL so the list does not depend on hotkey numbering. */
 const LENSES = [
-  ['pulse', 'Home'],
+  ['pulse', 'Command Center'],
   ['productions', 'Projects'],
-  ['schedule', 'Resources'],
+  ['schedule', 'Shoot Calendar'],
+  ['shootday', 'Shoot Day'],
+  ['scripts', 'Scripts'],
+  ['talent', 'Artists & Crew'],
+  ['post', 'Post & Reviews'],
+  ['tasks', 'Tasks'],
+  ['comms', 'Client Comms'],
+  ['reports', 'Reports'],
   ['people', 'Creative Team'],
   ['clients', 'Clients'],
   ['finance', 'Finance'],

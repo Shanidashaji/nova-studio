@@ -45,6 +45,23 @@ import type {
   StockMovementType,
   StudioBookingStatus,
   DocumentCategory,
+  TalentKind,
+  TalentBookingStatus,
+  CreativeKind,
+  ScriptStatus,
+  SceneStatus,
+  SceneSetting,
+  SceneTime,
+  BreakdownSource,
+  ShootLogKind,
+  FootageStatus,
+  InternalReviewStatus,
+  FeedbackSource,
+  MessageChannel,
+  MessageStatus,
+  MessageTrigger,
+  AutomationMode,
+  BudgetGroup,
 } from './enums';
 
 /** Free-form JSON column. Mongoose cannot type a recursive JSON union, so readers narrow it. */
@@ -399,6 +416,7 @@ export interface Task extends BaseDoc {
   blockedReason: string | null;
   completedAt: Date | null;
   parentId: string | null;
+  shootId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -436,6 +454,14 @@ export interface Deliverable extends BaseDoc {
   currentVersion: number;
   dueDate: Date | null;
   previewImageUrl: string | null;
+  /** Editor responsible for the cut (post-production). */
+  editorId: string | null;
+  /** Editing progress, 0-100, reported by the editor. */
+  editProgress: number;
+  internalReviewStatus: InternalReviewStatus;
+  internalReviewNote: string | null;
+  internalReviewedAt: Date | null;
+  internalReviewedBy: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -467,6 +493,8 @@ export interface FeedbackItem extends BaseDoc {
   body: string;
   author: string;
   status: FeedbackStatus;
+  /** Who gave the note: the client, or the studio's own internal review. */
+  source: FeedbackSource;
   createdAt: Date;
 }
 
@@ -485,6 +513,8 @@ export interface Approval extends BaseDoc {
   decidedAt: Date | null;
   decidedBy: string | null;
   note: string | null;
+  /** Review deadline; a pending approval past it is overdue. */
+  dueAt: Date | null;
 }
 
 /** Relations of Approval, available through `.populate()`. */
@@ -503,8 +533,29 @@ export interface Shoot extends BaseDoc {
   callTime: string | null;
   status: ShootStatus;
   notes: string | null;
+  /** Production manager running the shoot (a team member). */
+  productionManagerId: string | null;
+  /** Crew call (talent call is `callTime`). */
+  crewCallTime: string | null;
+  /** Call-sheet notes: parking, safety, nearest hospital, weather plan. */
+  callSheetNotes: string | null;
+  callSheetPublishedAt: Date | null;
+  checklist: ShootChecklistItem[];
+  footageStatus: FootageStatus;
+  wrapNotes: string | null;
+  startedAt: Date | null;
+  wrappedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ShootChecklistItem {
+  _id: string;
+  id: string;
+  label: string;
+  done: boolean;
+  doneAt: Date | null;
+  doneBy: string | null;
 }
 
 /** Relations of Shoot, available through `.populate()`. */
@@ -513,6 +564,10 @@ export interface ShootRelations {
   crew: CrewCall[];
   bookings: AssetBooking[];
   studioBookings: StudioBooking[];
+  talent: TalentBooking[];
+  scenes: Scene[];
+  log: ShootLogEntry[];
+  productionManager: TeamMember | null;
 }
 
 export interface CrewCall extends BaseDoc {
@@ -629,6 +684,10 @@ export interface Notification extends BaseDoc {
   entityType: string | null;
   entityId: string | null;
   readAt: Date | null;
+  /** Set when the underlying problem has been dealt with. */
+  resolvedAt: Date | null;
+  /** Generated alerts carry a key so the same alert is not raised twice. */
+  dedupeKey: string | null;
   createdAt: Date;
 }
 
@@ -1168,4 +1227,222 @@ export interface DocumentVersion extends BaseDoc {
 export interface DocumentVersionRelations {
   document: Document;
   uploadedBy: User;
+}
+
+// ── Production studio layer ──────────────────────────────────────────────────
+
+export interface TalentUnavailability {
+  _id: string;
+  id: string;
+  from: Date;
+  to: Date;
+  reason: string | null;
+}
+
+/** An external artist (actor, model, voice artist…), as opposed to a TeamMember on staff. */
+export interface Talent extends BaseDoc {
+  name: string;
+  kind: TalentKind;
+  email: string | null;
+  phone: string | null;
+  agency: string | null;
+  skills: string[];
+  languages: string[];
+  /** Playable age range, when it matters for casting. */
+  playingAgeMin: number | null;
+  playingAgeMax: number | null;
+  experienceYears: number;
+  baseCity: string;
+  willTravel: boolean;
+  dayRate: number;
+  portfolioUrl: string | null;
+  notes: string | null;
+  isActive: boolean;
+  unavailable: TalentUnavailability[];
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Relations of Talent, available through `.populate()`. */
+export interface TalentRelations {
+  bookings: TalentBooking[];
+}
+
+export interface TalentBooking extends BaseDoc {
+  talentId: string;
+  shootId: string;
+  /** Character or part, e.g. "Mother", "Hand model". */
+  character: string;
+  status: TalentBookingStatus;
+  fee: number;
+  note: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Relations of TalentBooking, available through `.populate()`. */
+export interface TalentBookingRelations {
+  talent: Talent;
+  shoot: Shoot;
+}
+
+/** A creative document of a project (brief, concept, script, storyboard, shot list). */
+export interface Script extends BaseDoc {
+  projectId: string;
+  kind: CreativeKind;
+  title: string;
+  status: ScriptStatus;
+  currentVersion: number;
+  clientInstructions: string | null;
+  notes: string | null;
+  submittedAt: Date | null;
+  decidedAt: Date | null;
+  decidedBy: string | null;
+  decisionNote: string | null;
+  createdById: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Relations of Script, available through `.populate()`. */
+export interface ScriptRelations {
+  project: Project;
+  versions: ScriptVersion[];
+  scenes: Scene[];
+  createdBy: User;
+}
+
+export interface ScriptVersion extends BaseDoc {
+  scriptId: string;
+  number: number;
+  body: string;
+  changeNote: string | null;
+  /** Name of the uploaded file the text came from, when it was uploaded. */
+  fileName: string | null;
+  authorId: string;
+  createdAt: Date;
+}
+
+/** Relations of ScriptVersion, available through `.populate()`. */
+export interface ScriptVersionRelations {
+  script: Script;
+  author: User;
+}
+
+/** One scene of the breakdown: what must be in front of the camera, and where. */
+export interface Scene extends BaseDoc {
+  projectId: string;
+  scriptId: string | null;
+  number: string;
+  sortOrder: number;
+  heading: string;
+  description: string | null;
+  setting: SceneSetting;
+  timeOfDay: SceneTime;
+  location: string | null;
+  characters: string[];
+  props: string[];
+  wardrobe: string[];
+  equipment: string[];
+  requirements: string | null;
+  estimatedMinutes: number;
+  shootId: string | null;
+  /** Calendar day of the (possibly multi-day) shoot this scene is planned for. */
+  shootDate: Date | null;
+  /** Planned start on the shoot day, HH:MM. */
+  plannedStart: string | null;
+  status: SceneStatus;
+  notes: string | null;
+  source: BreakdownSource;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Relations of Scene, available through `.populate()`. */
+export interface SceneRelations {
+  project: Project;
+  script: Script | null;
+  shoot: Shoot | null;
+}
+
+export interface ShootLogEntry extends BaseDoc {
+  shootId: string;
+  kind: ShootLogKind;
+  body: string;
+  minutesLost: number;
+  authorId: string;
+  resolvedAt: Date | null;
+  createdAt: Date;
+}
+
+/** Relations of ShootLogEntry, available through `.populate()`. */
+export interface ShootLogEntryRelations {
+  shoot: Shoot;
+  author: User;
+}
+
+export interface MessageTemplate extends BaseDoc {
+  trigger: MessageTrigger;
+  name: string;
+  channel: MessageChannel;
+  subject: string;
+  body: string;
+  mode: AutomationMode;
+  /** For time-based triggers: hours relative to the event (negative = before it). */
+  offsetHours: number;
+  updatedById: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ClientMessage extends BaseDoc {
+  clientId: string;
+  projectId: string | null;
+  shootId: string | null;
+  templateId: string | null;
+  trigger: MessageTrigger;
+  channel: MessageChannel;
+  recipientName: string;
+  recipientAddress: string | null;
+  subject: string;
+  body: string;
+  status: MessageStatus;
+  /** When a queued message is due to go out. */
+  scheduledFor: Date | null;
+  sentAt: Date | null;
+  /** Provider response, simulation notice or failure reason. */
+  statusNote: string | null;
+  provider: string | null;
+  /** Prevents the same automation from preparing the same message twice. */
+  dedupeKey: string | null;
+  /** Shoot start the message was written for (detects later schedule changes). */
+  scheduleStamp: Date | null;
+  createdById: string | null;
+  reviewedById: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Relations of ClientMessage, available through `.populate()`. */
+export interface ClientMessageRelations {
+  client: Client;
+  project: Project | null;
+  shoot: Shoot | null;
+  template: MessageTemplate | null;
+}
+
+export interface BudgetLine extends BaseDoc {
+  projectId: string;
+  group: BudgetGroup;
+  label: string;
+  estimated: number;
+  note: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** Relations of BudgetLine, available through `.populate()`. */
+export interface BudgetLineRelations {
+  project: Project;
 }

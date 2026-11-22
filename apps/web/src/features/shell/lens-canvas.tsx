@@ -14,6 +14,13 @@ import { PeopleLens } from '@/features/people/people-lens';
 import { ProductionsLens } from '@/features/productions/productions-lens';
 import { PulseLens } from '@/features/pulse/pulse-lens';
 import { ScheduleLens } from '@/features/schedule/schedule-lens';
+import { CommsLens } from '@/features/comms/comms-lens';
+import { PostLens } from '@/features/post/post-lens';
+import { ReportsLens } from '@/features/reports/reports-lens';
+import { ScriptsLens } from '@/features/scripts/scripts-lens';
+import { ShootDayLens } from '@/features/shootday/shoot-day-lens';
+import { TalentLens } from '@/features/talent/talent-lens';
+import { TasksLens } from '@/features/tasks/tasks-lens';
 import { useWorkspace, type Lens } from '@/store/workspace';
 
 const LENS_COMPONENTS: Record<Lens, () => React.JSX.Element> = {
@@ -30,6 +37,13 @@ const LENS_COMPONENTS: Record<Lens, () => React.JSX.Element> = {
   approvals: ApprovalsLens,
   documents: DocumentsLens,
   settings: SettingsLens,
+  tasks: TasksLens,
+  comms: CommsLens,
+  shootday: ShootDayLens,
+  scripts: ScriptsLens,
+  talent: TalentLens,
+  post: PostLens,
+  reports: ReportsLens,
 };
 
 /** Renders the active lens. Lenses are arrangements of the same data, not separate pages. */

@@ -54,7 +54,7 @@ export function Rail() {
                         'md:h-9 md:min-w-0 md:flex-none md:rounded-[12px] md:hover:bg-ink-2',
                         'lg:w-full lg:flex-row lg:justify-start lg:gap-3 lg:px-3',
                         active &&
-                          'text-ink-text md:bg-[var(--surface-1)] md:text-[var(--text)] md:shadow-[0_6px_18px_-8px_rgb(0_0_0/0.6)] md:hover:bg-[var(--surface-1)]',
+                          'text-ink-text md:bg-[var(--surface-1)] md:text-[var(--text)] md:shadow-[0_6px_18px_-8px_rgb(0_0_0/0.6)] md:hover:bg-[var(--surface-1)] md:hover:text-[var(--text)]',
                       )}
                     >
                       <Icon

@@ -49,6 +49,22 @@ Production stills are **graded frames**: deterministic SVG compositions per proj
 - **Real time** — Server-Sent Events push every change; open views refresh themselves.
 - **Notifications, command palette (Ctrl/⌘K), keyboard lenses (1–9), dark and light themes, responsive down to phones.**
 
+### Production studio
+
+The studio's production work, from brief to delivery ([ADR-0015](docs/decisions/0015-production-studio-layer.md)):
+
+- **Command Center** (home) — attention-required list (double bookings, shoots that are not ready, critical projects, overdue reviews, scripts waiting, overdue and blocked tasks, client messages to review), today's shoots with scene progress, simultaneous shoots, studio availability, projects by stage, deadlines and today's activity. Every figure opens the screen where it is dealt with.
+- **Shoot Calendar** — day, week, month and timeline views; multi-day shoots span their days; conflicts are outlined; the original call-sheet board and equipment grid remain.
+- **Shoot Day** (built for a phone on set) — day N of M, crew and talent call, production manager, client contact, scenes for the day with *Mark shot / Drop*, an on-set log of issues, delays and schedule changes, the call sheet (publish to crew), checklist, cast and crew, footage status and readiness. Confirming a shoot is refused until it is ready; starting needs a published call sheet.
+- **Scripts & pre-production** — briefs, concepts, scripts, storyboards and shot lists with versions, upload of text files, send for review, approve / request changes / reject (an approval covers one version). A rule-based breakdown suggests scenes, characters, props, equipment and requirements for review. Pre-production readiness per project lists what must be in place before shooting.
+- **Artists & Crew** — artist roster (type, skills, languages, playing age, experience, city, rate, portfolio, unavailable dates, booking history) and the crew with workload. Artist double bookings and unavailable dates are refused like crew and equipment. Rule-based recommendations rank artists and crew for a part or role with every reason shown.
+- **Post & Reviews** — editor assignment and progress, internal review before the client sees a cut, client review deadlines (overdue flagged), revision rounds, client vs internal feedback, footage status.
+- **Tasks** — every task across productions as a Kanban board, a sortable list or a calendar; overdue and blocked (status or unfinished prerequisite) are derived; tasks can be linked to a shoot.
+- **Client Comms** — templates and automation rules (off / draft for review / send automatically) for project and shoot confirmation, pre-shoot instructions, reminders, schedule changes, wrap updates, script review, approval requests, editing and review updates, revisions, delivery and feedback. Messages show *Draft · Queued · Simulated · Sent · Failed · Cancelled*. Without an email provider nothing is sent and the message says so.
+- **Budget plan** (project → Budget) — estimates per group (production, crew, artists, equipment, post, other) against approved and paid expenses, committed artist fees, variance and margin.
+- **Reports & Capacity** — can the studio take another project (shoot capacity from directors, camera operators, camera bodies and leave; team workload), daily load, overlapping shoots, crew and artist utilisation, project performance (CSV export), delays, upcoming deliveries, budget performance, revision statistics and client activity.
+- **Smart alerts** — shoots within 24 hours, double bookings, overdue tasks and reviews, deadlines at risk and failed messages become notifications; mark them read, unread or resolved.
+
 ### Business operations (ERP)
 
 The same workspace also runs the business around the productions. Each module is a lens or a panel in the one shell — not a separate dashboard — and every rule below is enforced by the API ([plan](docs/development/erp-expansion-plan.md)).
@@ -65,7 +81,7 @@ The same workspace also runs the business around the productions. Each module is
 
 ### NOVA assistant
 
-- Asks: _What needs my attention today? · Which projects are delayed? · Which workflows are blocked? · Show the workload of the team · Find projects approaching their deadline · Summarize the activity from this week · Woven Light_ (briefing).
+- Asks: _What should the studio manager focus on today? · Which shoots are scheduled today? · Which artists (or crew) are available? · Do any shoots have scheduling conflicts? · Which tasks are overdue? · Which scripts are waiting for approval? · What needs my attention today? · Which projects are delayed? · Which workflows are blocked? · Show the workload of the team · Find projects approaching their deadline · Summarize the activity from this week · Woven Light_ (briefing).
 - Changes (always proposals): _Create a task "Final mix review" for Woven Light due Friday for Sreejith · Mark sky replacement on Woven Light as done · Reassign colour grade on Campus Stories to Divya · Advance Product Demo v4 · Log a call with ZenPods: marketing head reviewing v2 tomorrow._
 - Context-aware: "this project" means the one open in the inspector or in focus.
 - Proposals go **stale** if their target changed before confirmation; blocked stage moves are explained instead of proposed.
@@ -145,6 +161,8 @@ Any MongoDB 7+ **replica set** works too (transactions need one). To run the API
 | `SESSION_TTL_HOURS`, `SESSION_IDLE_HOURS`                    | Absolute (7 days) and idle (8 hours) session limits                      |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_ADMIN_NAME` | Initial administrator — never committed                                  |
 | `ANTHROPIC_API_KEY`, `ASSISTANT_MODEL`                       | Optional: enable the Claude provider                                     |
+| `RESEND_API_KEY`, `MAIL_FROM`                                | Optional: send approved client emails (otherwise recorded as simulated)  |
+| `STUDIO_NAME`, `REVIEW_LINK_BASE`                            | Optional: `{{studio}}` and `{{reviewLink}}` in message templates         |
 
 The API validates its environment at start-up and refuses to run with a helpful message if anything is missing.
 
@@ -194,7 +212,7 @@ The Neon Minds website was used for the company's name, services, project-type v
 
 ## Limitations
 
-Finance is a demonstration ledger, not an accounting system: no double entry, tax filing or payment reversal yet. Payroll is out of scope. Media review is text-based (no video player); clients do not log in (the studio records their decisions); live updates (SSE) reach clients connected to the same server instance — on Vercel other clients catch up when their stream reconnects; health and flow are computed in memory — fine for a studio's working set. Development notes, issues met during the build and planned improvements: [roadmap](docs/development/roadmap.md).
+Client email is sent only when Resend is configured, and WhatsApp is never sent (both are recorded as simulated otherwise). Script breakdown, recommendations and readiness are rule-based, not AI. Finance is a demonstration ledger, not an accounting system: no double entry, tax filing or payment reversal yet. Payroll is out of scope. Media review is text-based (no video player); clients do not log in (the studio records their decisions); live updates (SSE) reach clients connected to the same server instance — on Vercel other clients catch up when their stream reconnects; health and flow are computed in memory — fine for a studio's working set. Development notes, issues met during the build and planned improvements: [roadmap](docs/development/roadmap.md).
 
 ## Documentation
 
