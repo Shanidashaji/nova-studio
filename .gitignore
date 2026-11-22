@@ -1,0 +1,31 @@
+node_modules/
+dist/
+.next/
+.turbo/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Generated
+packages/db/src/generated/
+
+# Local database (default location is outside the repo; this guards against overrides)
+.pgdata/
+
+# Test output
+playwright-report/
+test-results/
+tests/e2e/.auth/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.next-verify/

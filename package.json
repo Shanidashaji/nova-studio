@@ -1,0 +1,31 @@
+{
+  "name": "nova",
+  "private": true,
+  "description": "NOVA — the intelligent business operating system for a cinematic production studio",
+  "packageManager": "pnpm@10.34.7",
+  "engines": {
+    "node": ">=24.7"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "db:start": "node scripts/dev-db.mjs",
+    "db:migrate": "pnpm --filter @nova/db migrate:dev",
+    "db:deploy": "pnpm --filter @nova/db migrate:deploy",
+    "db:seed": "turbo run seed --filter=@nova/db --output-logs=new-only",
+    "db:reset": "turbo run reset --filter=@nova/db --output-logs=new-only",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "pnpm --filter @nova/e2e test:e2e",
+    "screenshots": "pnpm --filter @nova/e2e screenshots"
+  },
+  "devDependencies": {
+    "prettier": "3.10.1",
+    "turbo": "2.11.13",
+    "typescript": "6.0.3",
+    "embedded-postgres": "18.7.0-beta.19"
+  }
+}

@@ -1,0 +1,34 @@
+// Shared ESLint flat config for TypeScript packages.
+import js from '@eslint/js';
+import globals from 'globals';
+import tseslint from 'typescript-eslint';
+
+/** @param {{ tsconfigRootDir: string }} options */
+export function createConfig({ tsconfigRootDir }) {
+  return tseslint.config(
+    { ignores: ['dist/**', 'coverage/**', 'src/generated/**', '**/*.d.ts'] },
+    js.configs.recommended,
+    ...tseslint.configs.recommendedTypeChecked,
+    {
+      languageOptions: {
+        globals: { ...globals.node },
+        parserOptions: { projectService: true, tsconfigRootDir },
+      },
+      rules: {
+        '@typescript-eslint/no-unused-vars': [
+          'error',
+          { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+        ],
+        '@typescript-eslint/consistent-type-imports': [
+          'error',
+          { fixStyle: 'inline-type-imports' },
+        ],
+        'no-console': ['warn', { allow: ['warn', 'error'] }],
+      },
+    },
+    {
+      files: ['**/*.mjs', '**/*.js'],
+      ...tseslint.configs.disableTypeChecked,
+    },
+  );
+}

@@ -1,0 +1,52 @@
+{
+  "name": "@nova/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3100",
+    "build": "next build",
+    "start": "next start --port 3100",
+    "typecheck": "next typegen && tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@nova/shared": "workspace:*",
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "@hookform/resolvers": "7.0.8",
+    "@tanstack/react-query": "5.108.2",
+    "@xyflow/react": "13.0.2",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "cmdk": "1.1.1",
+    "lucide-react": "1.77.0",
+    "motion": "14.14.0",
+    "radix-ui": "1.8.1",
+    "react-hook-form": "7.92.0",
+    "recharts": "3.11.0",
+    "sonner": "2.0.8",
+    "tailwind-merge": "3.7.1",
+    "zod": "4.6.7",
+    "zustand": "5.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.5",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.5",
+    "typescript": "6.0.3",
+    "@nova/config": "workspace:*",
+    "@testing-library/jest-dom": "6.10.0",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.13",
+    "@vitejs/plugin-react": "6.3.0",
+    "eslint": "10.15.0",
+    "eslint-config-next": "16.4.6",
+    "jsdom": "27.4.0",
+    "vitest": "4.1.12",
+    "dotenv": "17.4.2"
+  }
+}

@@ -1,0 +1,124 @@
+/*
+ * NOVA design tokens — "Grading Suite" (docs/design/01-design-system.md).
+ * Components use these variables only; themes are a full token swap.
+ */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #060908;
+  --surface-1: #0c1110;
+  --surface-2: #121816;
+  --surface-3: #1a211f;
+  --line: #1d2624;
+  --line-strong: #2c3835;
+  --text: #ecefed;
+  --text-2: #a3aba7;
+  --text-3: #848d88;
+
+  --tint: 13%;
+  --avatar-depth: 100%;
+  --signal: #3ef0a1;
+  --attention: #f2b53c;
+  --critical: #ff6b6b;
+  --info: #7aa7ff;
+  --ai: #b79cff;
+  --on-signal: #04140c;
+  --brand: #ff6a45;
+  --brand-2: #ffb054;
+  --on-brand: #160805;
+
+  /* Categorical chart series, fixed order (validated: scripts/validate_palette — dark, surface-1).
+     Chosen to avoid the signal/attention/critical hues. cat-5/6 are avatar tones, not chart series. */
+  --cat-1: #3987e5;
+  --cat-2: #d95926;
+  --cat-3: #9085e9;
+  --cat-4: #d55181;
+  --cat-5: #6fa36a;
+  --cat-6: #c76b98;
+
+  --shadow-float: 0 18px 48px -12px rgb(0 0 0 / 0.65), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --scrim: rgb(5 6 6 / 0.6);
+  --shadow-card: 0 0 0 1px rgb(255 255 255 / 0.02);
+
+  /* Card surface: a faint top-lit gradient over surface-1, as in a grading suite. */
+  --card:
+    linear-gradient(180deg, rgb(255 255 255 / 0.025), rgb(255 255 255 / 0) 40%), var(--surface-1);
+  --glow:
+    0 0 0 1px var(--signal-line), 0 0 24px -4px color-mix(in oklab, var(--signal) 45%, transparent);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* "Atelier" — warm paper, ink and a vermilion key light. */
+  --bg: #f4eee5;
+  --surface-1: #fffdfa;
+  --surface-2: #f8f3ec;
+  --surface-3: #eee7dc;
+  --line: #ebe3d7;
+  --line-strong: #d9cdbc;
+  --text: #1b1714;
+  --text-2: #554d46;
+  --text-3: #6e655d;
+
+  /*
+   * Status colours double as text on their own tint (badges, alerts, table cells). Each is the
+   * lightest shade of its hue that keeps 4.5:1 (WCAG AA, small text) on that tint over every
+   * paper surface. tests/e2e/a11y.spec.ts (axe) checks every lens in both themes.
+   */
+  --signal: #11613c;
+  --attention: #834504;
+  --critical: #9b2b19;
+  --info: #264fa9;
+  --ai: #5b3fb4;
+  --on-signal: #ffffff;
+  --tint: 10%;
+  /* Avatars carry paper-coloured initials: the series colours are deepened to keep them legible. */
+  --avatar-depth: 60%;
+  --brand: #c23a1f;
+  --brand-2: #f29a3a;
+  --on-brand: #ffffff;
+
+  --cat-1: #2a78d6;
+  --cat-2: #eb6834;
+  --cat-3: #6250d6;
+  --cat-4: #e87ba4;
+  --cat-5: #3e7a39;
+  --cat-6: #a3406f;
+
+  --shadow-float: 0 18px 48px -16px rgb(58 38 20 / 0.28), 0 0 0 1px rgb(58 38 20 / 0.06);
+  --shadow-card: 0 1px 2px rgb(58 38 20 / 0.04), 0 10px 28px -14px rgb(58 38 20 / 0.18);
+  --scrim: rgb(27 23 20 / 0.35);
+
+  --card: var(--surface-1);
+  --glow:
+    0 0 0 1px var(--brand-line), 0 0 18px -6px color-mix(in oklab, var(--brand) 45%, transparent);
+}
+
+:root {
+  --signal-soft: color-mix(in oklab, var(--signal) var(--tint), transparent);
+  --signal-line: color-mix(in oklab, var(--signal) 38%, transparent);
+  --attention-soft: color-mix(in oklab, var(--attention) var(--tint), transparent);
+  --attention-line: color-mix(in oklab, var(--attention) 38%, transparent);
+  --critical-soft: color-mix(in oklab, var(--critical) var(--tint), transparent);
+  --critical-line: color-mix(in oklab, var(--critical) 38%, transparent);
+  --info-soft: color-mix(in oklab, var(--info) var(--tint), transparent);
+  --info-line: color-mix(in oklab, var(--info) 38%, transparent);
+  --ai-soft: color-mix(in oklab, var(--ai) var(--tint), transparent);
+  --ai-line: color-mix(in oklab, var(--ai) 38%, transparent);
+  --brand-soft: color-mix(in oklab, var(--brand) 12%, transparent);
+  --brand-line: color-mix(in oklab, var(--brand) 40%, transparent);
+
+  /* The sidebar is always ink, in both themes. */
+  --ink: #141110;
+  --ink-2: #221d1a;
+  --ink-line: #2e2824;
+  --ink-text: #f4eee5;
+  --ink-text-2: #a89d93;
+
+  --m-fast: 120ms;
+  --m-base: 200ms;
+  --m-slow: 320ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}

@@ -1,0 +1,11 @@
+pnpm-lock.yaml
+dist
+.next
+coverage
+packages/db/src/generated
+packages/db/prisma/migrations
+next-env.d.ts
+tests/e2e/playwright-report
+tests/e2e/test-results
+docs/screenshots
+.next-verify

@@ -1,0 +1,286 @@
+/*
+ * NOVA robot — state animations. The root carries data-state and a live --level (0–1) written
+ * from real signals: microphone input while listening, speech progress events while speaking.
+ */
+
+.root {
+  --accent: var(--signal);
+  --level: 0;
+  display: block;
+  overflow: visible;
+  color: var(--accent);
+}
+.root[data-state='processing'] {
+  --accent: color-mix(in oklab, var(--signal) 50%, var(--info));
+}
+.root[data-state='error'] {
+  --accent: var(--attention);
+}
+
+.accentFill {
+  fill: var(--accent);
+  transition: fill var(--m-slow) var(--ease);
+}
+.accentStroke {
+  stroke: var(--accent);
+  transition: stroke var(--m-slow) var(--ease);
+}
+.accentStop {
+  stop-color: var(--accent);
+}
+
+/* Whole figure floats; the base glow answers it. */
+.figure {
+  animation: float 5.5s ease-in-out infinite;
+  transform-box: view-box;
+}
+.base {
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: blur(2px);
+  animation: base 5.5s ease-in-out infinite;
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2.5px);
+  }
+}
+@keyframes base {
+  0%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scaleX(0.86);
+    opacity: 0.35;
+  }
+}
+
+.head {
+  transform-box: view-box;
+  transform-origin: 60px 64px;
+  transition: transform var(--m-slow) var(--ease);
+}
+.root[data-state='listening'] .head {
+  transform: rotate(-3deg);
+}
+.root[data-state='error'] .head {
+  animation: shake 0.5s var(--ease) 1;
+}
+@keyframes shake {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  25% {
+    transform: rotate(-4deg);
+  }
+  60% {
+    transform: rotate(3deg);
+  }
+}
+
+/* Aura: a soft accent glow, brighter with voice level. */
+.aura {
+  opacity: calc(0.35 + var(--level) * 0.5);
+  transition: opacity 90ms linear;
+}
+.root[data-state='idle'] .aura {
+  animation: breathe 5.5s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* Eyes */
+.eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: drop-shadow(0 0 2.5px var(--accent));
+  transition: transform var(--m-base) var(--ease);
+}
+.eyeShape {
+  transition: opacity var(--m-base) var(--ease);
+}
+.happy {
+  opacity: 0;
+  transition: opacity var(--m-base) var(--ease);
+}
+.root[data-state='idle'] .eye {
+  animation: blink 6.5s infinite;
+}
+.root[data-state='listening'] .eye {
+  transform: scale(1.1);
+}
+.root[data-state='processing'] .eye {
+  transform: scaleY(0.3);
+}
+.root[data-state='speaking'] .eye {
+  transform: scaleY(0.82);
+}
+.root[data-state='success'] .eyeShape {
+  opacity: 0;
+}
+.root[data-state='success'] .happy {
+  opacity: 1;
+}
+.root[data-state='error'] .eyeLeft {
+  transform: rotate(14deg) scaleY(0.62);
+}
+.root[data-state='error'] .eyeRight {
+  transform: rotate(-14deg) scaleY(0.62);
+}
+@keyframes blink {
+  0%,
+  94%,
+  100% {
+    transform: scaleY(1);
+  }
+  96% {
+    transform: scaleY(0.08);
+  }
+}
+
+/* Visor scan line while processing. */
+.scan {
+  opacity: 0;
+}
+.root[data-state='processing'] .scan {
+  opacity: 0.55;
+  animation: scan 1.4s var(--ease) infinite alternate;
+}
+@keyframes scan {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(50px);
+  }
+}
+
+/* Mouth: a light bar whose segments follow speech progress. */
+.bar {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: scaleY(0.25);
+  opacity: 0.35;
+  transition:
+    transform 70ms linear,
+    opacity var(--m-base);
+}
+.root[data-state='speaking'] .bar {
+  opacity: 1;
+  transform: scaleY(calc(0.25 + var(--level) * var(--k, 1)));
+}
+
+/* Ears: emitters that light with microphone input. */
+.ear {
+  opacity: 0.25;
+  transition: opacity 90ms linear;
+}
+.root[data-state='listening'] .ear {
+  opacity: calc(0.45 + var(--level) * 0.55);
+}
+.root[data-state='speaking'] .ear {
+  opacity: 0.55;
+}
+
+/* Listening rings scale with the real input level. */
+.ring {
+  transform-box: view-box;
+  transform-origin: 60px 64px;
+  opacity: 0;
+  transition:
+    transform 90ms linear,
+    opacity var(--m-base);
+}
+.root[data-state='listening'] .ring {
+  opacity: calc(0.15 + var(--level) * 0.6);
+  transform: scale(calc(0.94 + var(--level) * 0.14));
+}
+.root[data-state='listening'] .ring2 {
+  opacity: calc(var(--level) * 0.45);
+  transform: scale(calc(0.98 + var(--level) * 0.22));
+}
+
+/* Orbit: a comet circling the head while NOVA works. */
+.orbit {
+  transform-box: view-box;
+  transform-origin: 60px 64px;
+  opacity: 0;
+  transition: opacity var(--m-base);
+}
+.root[data-state='processing'] .orbit {
+  opacity: 1;
+  animation: spin 1.6s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Antenna node */
+.node {
+  transform-box: fill-box;
+  transform-origin: center;
+  filter: drop-shadow(0 0 2px var(--accent));
+}
+.root[data-state='processing'] .node {
+  animation: pulse 0.8s ease-in-out infinite alternate;
+}
+.root[data-state='success'] .node {
+  animation: pop 0.6s var(--ease) 1;
+}
+@keyframes pulse {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes pop {
+  40% {
+    transform: scale(1.8);
+  }
+}
+
+/* Core light in the collar breathes in every state. */
+.core {
+  filter: drop-shadow(0 0 2px var(--accent));
+  animation: breathe 5.5s ease-in-out infinite;
+}
+
+/* Static glyph (message avatars): no motion at all. */
+.still,
+.still * {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .figure,
+  .base,
+  .eye,
+  .aura,
+  .core,
+  .orbit,
+  .scan,
+  .head {
+    animation: none !important;
+  }
+  .root[data-state='processing'] .orbit {
+    opacity: 0.8;
+  }
+}
