@@ -11,7 +11,36 @@ config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
  * project. Set API_INTERNAL_URL only to send /api/* to a separately running API instead
  * (e.g. `pnpm --filter @nova/api start` while debugging the API on its own).
  */
-const externalApi = process.env.API_INTERNAL_URL?.trim();
+const externalApi = selfSafeApiUrl(process.env.API_INTERNAL_URL);
+
+/**
+ * API_INTERNAL_URL pointing at this app's own address would make the rewrite forward every
+ * /api/* request back to itself until Vercel stops it with 508 Loop Detected. Such a value is
+ * ignored so the built-in API route answers instead.
+ */
+function selfSafeApiUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim().replace(/\/+$/, '');
+  if (!value) return undefined;
+  let host: string;
+  try {
+    host = new URL(value).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  const ownHosts = [
+    process.env.VERCEL_URL,
+    process.env.VERCEL_BRANCH_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.WEB_ORIGIN,
+  ]
+    .filter((h): h is string => Boolean(h))
+    .map((h) => h.replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase());
+  if (ownHosts.includes(host)) {
+    console.warn(`API_INTERNAL_URL (${value}) is this app's own address; using the built-in API.`);
+    return undefined;
+  }
+  return value;
+}
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
