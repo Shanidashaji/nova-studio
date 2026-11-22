@@ -5,7 +5,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**", "src/generated/**"]
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      "env": ["NODE_ENV", "API_INTERNAL_URL", "NEXT_DIST_DIR"]
     },
     "dev": {
       "dependsOn": ["^build"],
@@ -31,5 +32,12 @@
       "dependsOn": ["^build"],
       "cache": false
     }
-  }
+  },
+  "globalPassThroughEnv": [
+    "VERCEL",
+    "VERCEL_ENV",
+    "VERCEL_URL",
+    "VERCEL_BRANCH_URL",
+    "VERCEL_PROJECT_PRODUCTION_URL"
+  ]
 }

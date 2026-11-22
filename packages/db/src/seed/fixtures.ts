@@ -13,7 +13,7 @@ import type {
   ProjectType,
   StageKey,
   StudioLocation,
-} from '../generated/prisma/client';
+} from '../models/enums';
 
 // ─── Workflow templates ───────────────────────────────────────────────────────
 

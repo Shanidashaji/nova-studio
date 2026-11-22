@@ -65,27 +65,30 @@ export function ProjectInspector({ id, section }: { id: string; section?: string
             aria-label="Project sections"
             className="scrollbar-none sticky top-0 z-10 flex gap-0.5 overflow-x-auto border-b border-line bg-surface-1 px-2 py-1.5"
           >
-            {TABS.map(([key, label]) => (
-              <button
-                key={key}
-                role="tab"
-                type="button"
-                aria-selected={tab === key}
-                onClick={() => setTab(key)}
-                className={cn(
-                  'h-7 shrink-0 rounded-[var(--radius-sm)] px-2.5 text-xs',
-                  tab === key ? 'bg-surface-3 text-text' : 'text-text-3 hover:text-text',
-                )}
-              >
-                {label}
-                {key === 'tasks' && q.data.blockedTasks > 0 ? (
-                  <span className="ml-1 text-critical">•</span>
-                ) : null}
-                {key === 'deliverables' && q.data.pendingApprovals > 0 ? (
-                  <span className="ml-1 text-attention">•</span>
-                ) : null}
-              </button>
-            ))}
+            {/* No Budget tab when the API withheld the figures from this role. */}
+            {TABS.filter(([key]) => key !== 'budget' || q.data.finance !== null).map(
+              ([key, label]) => (
+                <button
+                  key={key}
+                  role="tab"
+                  type="button"
+                  aria-selected={tab === key}
+                  onClick={() => setTab(key)}
+                  className={cn(
+                    'h-7 shrink-0 rounded-[var(--radius-sm)] px-2.5 text-xs',
+                    tab === key ? 'bg-surface-3 text-text' : 'text-text-3 hover:text-text',
+                  )}
+                >
+                  {label}
+                  {key === 'tasks' && q.data.blockedTasks > 0 ? (
+                    <span className="ml-1 text-critical">•</span>
+                  ) : null}
+                  {key === 'deliverables' && q.data.pendingApprovals > 0 ? (
+                    <span className="ml-1 text-attention">•</span>
+                  ) : null}
+                </button>
+              ),
+            )}
           </div>
           <div role="tabpanel">
             {tab === 'overview' ? <Overview p={q.data} /> : null}
@@ -221,7 +224,13 @@ function Overview({ p }: { p: ProjectDetail }) {
               'Due',
               `${date(p.dueDate, { day: 'numeric', month: 'short', year: 'numeric' })} · ${relativeDay(p.dueDate)}`,
             ],
-            ['Budget', `${money(p.spent)} of ${money(p.budget)} spent`],
+            // Withheld from roles that may not see what a production costs.
+            ...(p.budget === null
+              ? []
+              : ([['Budget', `${money(p.spent)} of ${money(p.budget)} spent`]] as [
+                  string,
+                  string,
+                ][])),
             ['Revisions', `${p.includedRevisions} rounds included`],
           ]}
         />

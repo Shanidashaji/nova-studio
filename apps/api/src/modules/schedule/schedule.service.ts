@@ -1,5 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import {
+  AssetCategory,
+  type Asset,
+  type AssetBooking,
+  type CrewCall,
+  type LeaveRequest,
+  type Project,
+  type Shoot,
+  type TeamMember,
+} from '@nova/db';
+import {
   clashesWith,
   DAY_MS,
   leaveOverlaps,
@@ -17,18 +27,32 @@ import {
   type UpdateShoot,
 } from '@nova/shared';
 import { conflict, notFound, unprocessable } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
-import { iso, shootInclude, toShootView } from '../projects/project.mapper';
+import { iso, shootPopulate, toShootView, type ShootRow } from '../projects/project.mapper';
 import { ScheduleConflicts } from './schedule-conflicts';
 
 const fmt = (d: Date) =>
   d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
 
+/** UTC midnight of the UTC day `d` falls on (leave dates are stored as whole UTC days). */
+const utcDay = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+
+/** Asset categories in their declared order (the former Postgres enum sort order). */
+const CATEGORY_ORDER: readonly string[] = Object.values(AssetCategory);
+
+type ProjectRef = Pick<Project, '_id' | 'id' | 'code' | 'title'>;
+const projectRef = (p: ProjectRef) => ({ id: p.id, code: p.code, title: p.title });
+
+/** Ids of cancelled shoots: their bookings and crew calls no longer reserve anything. */
+async function cancelledShootIds(database: DatabaseService): Promise<string[]> {
+  return database.models.Shoot.distinct('_id', { status: 'CANCELLED' });
+}
+
 @Injectable()
 export class ScheduleService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
     private readonly conflicts: ScheduleConflicts,
   ) {}
@@ -42,11 +66,10 @@ export class ScheduleService {
   async view(query: RangeQuery): Promise<ScheduleView> {
     const { from, to } = this.window(query);
     const [shoots, assets, conflicts] = await Promise.all([
-      this.prisma.db.shoot.findMany({
-        where: { startsAt: { lt: to }, endsAt: { gt: from } },
-        include: shootInclude,
-        orderBy: { startsAt: 'asc' },
-      }),
+      this.database.models.Shoot.find({ startsAt: { $lt: to }, endsAt: { $gt: from } })
+        .sort({ startsAt: 1 })
+        .populate(shootPopulate)
+        .lean<ShootRow[]>(),
       this.assets({ from, to }),
       this.conflicts.all(from, to),
     ]);
@@ -63,28 +86,41 @@ export class ScheduleService {
   async assets(query: RangeQuery): Promise<AssetView[]> {
     const { from, to } = this.window(query);
     const [assets, conflicts] = await Promise.all([
-      this.prisma.db.asset.findMany({
-        include: {
-          bookings: {
-            where: { startsAt: { lt: to }, endsAt: { gt: from } },
-            include: {
-              shoot: {
-                select: {
-                  id: true,
-                  title: true,
-                  status: true,
-                  project: { select: { id: true, code: true, title: true } },
-                },
-              },
-              project: { select: { id: true, code: true, title: true } },
+      this.database.models.Asset.find()
+        .populate({
+          path: 'bookings',
+          match: { startsAt: { $lt: to }, endsAt: { $gt: from } },
+          options: { sort: { startsAt: 1 } },
+          populate: [
+            {
+              path: 'shoot',
+              // projectId is the local field of the nested project populate.
+              select: { title: 1, status: 1, projectId: 1 },
+              populate: { path: 'project', select: { code: 1, title: 1 } },
             },
-            orderBy: { startsAt: 'asc' },
-          },
-        },
-        orderBy: [{ category: 'asc' }, { name: 'asc' }],
-      }),
+            { path: 'project', select: { code: 1, title: 1 } },
+          ],
+        })
+        .lean<
+          (Asset & {
+            bookings: (AssetBooking & {
+              shoot:
+                | (Pick<Shoot, '_id' | 'id' | 'title' | 'status' | 'projectId'> & {
+                    project: ProjectRef | null;
+                  })
+                | null;
+              project: ProjectRef | null;
+            })[];
+          })[]
+        >(),
       this.conflicts.all(),
     ]);
+    // Category in declared enum order, then name (as Postgres ordered them).
+    assets.sort(
+      (a, b) =>
+        CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category) ||
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    );
     const conflicted = new Set(conflicts.flatMap((c) => c.bookingIds));
     return assets.map((a) => ({
       id: a.id,
@@ -102,25 +138,31 @@ export class ScheduleService {
           startsAt: iso(b.startsAt),
           endsAt: iso(b.endsAt),
           shoot: b.shoot ? { id: b.shoot.id, title: b.shoot.title } : null,
-          project: b.project ?? b.shoot?.project ?? null,
+          project: b.project
+            ? projectRef(b.project)
+            : b.shoot?.project
+              ? projectRef(b.shoot.project)
+              : null,
           conflict: conflicted.has(b.id),
         })),
     }));
   }
 
   async getShoot(id: string): Promise<ShootView> {
-    const shoot = await this.prisma.db.shoot.findUnique({ where: { id }, include: shootInclude });
+    const shoot = await this.database.models.Shoot.findById(id)
+      .populate(shootPopulate)
+      .lean<ShootRow>();
     if (!shoot) throw notFound('Shoot');
     const conflicts = await this.conflicts.forShoots([id]);
     return toShootView(shoot, conflicts.get(id));
   }
 
   async createShoot(input: CreateShoot, user: SessionUser): Promise<ShootView> {
-    const project = await this.prisma.db.project.findUnique({ where: { id: input.projectId } });
+    const project = await this.database.models.Project.findById(input.projectId).lean<Project>();
     if (!project) throw unprocessable('INVALID_PROJECT', 'Choose an existing project.');
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      const shoot = await tx.shoot.create({ data: input });
-      const log = await this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const shoot = (await this.database.models.Shoot.create(input)).toObject<Shoot>();
+      const log = await this.activity.record({
         actorId: user.id,
         action: 'shoot.created',
         entityType: 'shoot',
@@ -135,10 +177,7 @@ export class ScheduleService {
   }
 
   async updateShoot(id: string, input: UpdateShoot, user: SessionUser): Promise<ShootView> {
-    const before = await this.prisma.db.shoot.findUnique({
-      where: { id },
-      include: { project: true },
-    });
+    const before = await this.database.models.Shoot.findById(id).lean<Shoot>();
     if (!before) throw notFound('Shoot');
     const startsAt = input.startsAt ?? before.startsAt;
     const endsAt = input.endsAt ?? before.endsAt;
@@ -163,13 +202,17 @@ export class ScheduleService {
         );
       }
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.shoot.update({ where: { id }, data: input });
+    const row = await this.database.transaction(async () => {
+      const updated = await this.database.models.Shoot.updateOne({ _id: id }, { $set: input });
+      if (updated.matchedCount === 0) throw notFound('Shoot');
       // Equipment bookings follow the shoot's time window.
       if (input.startsAt || input.endsAt) {
-        await tx.assetBooking.updateMany({ where: { shootId: id }, data: { startsAt, endsAt } });
+        await this.database.models.AssetBooking.updateMany(
+          { shootId: id },
+          { $set: { startsAt, endsAt } },
+        );
       }
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         action: input.status === 'CANCELLED' ? 'shoot.cancelled' : 'shoot.updated',
         entityType: 'shoot',
@@ -196,35 +239,29 @@ export class ScheduleService {
     window: { startsAt: Date; endsAt: Date },
     revived: boolean,
   ): Promise<string[]> {
+    // Other reservations: anything not on this shoot and not on a cancelled shoot ($nin also
+    // keeps project-only bookings, whose shootId is null).
+    const elsewhere = { shootId: { $nin: [shootId, ...(await cancelledShootIds(this.database))] } };
     const [bookings, calls] = await Promise.all([
-      this.prisma.db.assetBooking.findMany({
-        where: { shootId },
-        include: {
-          asset: {
-            include: {
-              bookings: {
-                where: {
-                  NOT: { shootId },
-                  OR: [{ shootId: null }, { shoot: { status: { not: 'CANCELLED' } } }],
-                },
-              },
-            },
+      this.database.models.AssetBooking.find({ shootId })
+        .populate({ path: 'asset', populate: { path: 'bookings', match: elsewhere } })
+        .lean<(AssetBooking & { asset: Asset & { bookings: AssetBooking[] } })[]>(),
+      this.database.models.CrewCall.find({ shootId })
+        .populate({
+          path: 'teamMember',
+          populate: {
+            path: 'crewCalls',
+            match: elsewhere,
+            populate: { path: 'shoot', select: { startsAt: 1, endsAt: 1 } },
           },
-        },
-      }),
-      this.prisma.db.crewCall.findMany({
-        where: { shootId },
-        include: {
-          teamMember: {
-            include: {
-              crewCalls: {
-                where: { NOT: { shootId }, shoot: { status: { not: 'CANCELLED' } } },
-                include: { shoot: { select: { startsAt: true, endsAt: true } } },
-              },
-            },
-          },
-        },
-      }),
+        })
+        .lean<
+          (CrewCall & {
+            teamMember: TeamMember & {
+              crewCalls: (CrewCall & { shoot: Pick<Shoot, 'startsAt' | 'endsAt'> })[];
+            };
+          })[]
+        >(),
     ]);
     const isNew = (other: { startsAt: Date; endsAt: Date }) =>
       rangesOverlap(other, window) && (revived || !rangesOverlap(other, current));
@@ -248,20 +285,25 @@ export class ScheduleService {
 
   /** Books equipment for a shoot. Overlaps are rejected unless explicitly allowed. */
   async bookAsset(shootId: string, input: BookAsset, user: SessionUser): Promise<ShootView> {
-    const shoot = await this.prisma.db.shoot.findUnique({ where: { id: shootId } });
+    const shoot = await this.database.models.Shoot.findById(shootId).lean<Shoot>();
     if (!shoot) throw notFound('Shoot');
     this.assertOpen(shoot);
-    const asset = await this.prisma.db.asset.findUnique({
-      where: { id: input.assetId },
-      include: {
-        bookings: {
-          include: {
-            shoot: { select: { title: true, status: true } },
-            project: { select: { title: true } },
-          },
-        },
-      },
-    });
+    const asset = await this.database.models.Asset.findById(input.assetId)
+      .populate({
+        path: 'bookings',
+        populate: [
+          { path: 'shoot', select: { title: 1, status: 1 } },
+          { path: 'project', select: { title: 1 } },
+        ],
+      })
+      .lean<
+        Asset & {
+          bookings: (AssetBooking & {
+            shoot: Pick<Shoot, '_id' | 'id' | 'title' | 'status'> | null;
+            project: Pick<Project, '_id' | 'id' | 'title'> | null;
+          })[];
+        }
+      >();
     if (!asset) throw unprocessable('INVALID_ASSET', 'Choose an existing asset.');
     if (asset.status !== 'AVAILABLE') {
       throw conflict(
@@ -292,11 +334,14 @@ export class ScheduleService {
         },
       );
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.assetBooking.create({
-        data: { assetId: asset.id, shootId, startsAt: shoot.startsAt, endsAt: shoot.endsAt },
+    const row = await this.database.transaction(async () => {
+      await this.database.models.AssetBooking.create({
+        assetId: asset.id,
+        shootId,
+        startsAt: shoot.startsAt,
+        endsAt: shoot.endsAt,
       });
-      return this.activity.record(tx, {
+      return this.activity.record({
         actorId: user.id,
         action: 'asset.booked',
         entityType: 'asset',
@@ -310,14 +355,16 @@ export class ScheduleService {
   }
 
   async removeBooking(shootId: string, bookingId: string, user: SessionUser): Promise<ShootView> {
-    const booking = await this.prisma.db.assetBooking.findFirst({
-      where: { id: bookingId, shootId },
-      include: { asset: true, shoot: true },
-    });
+    const booking = await this.database.models.AssetBooking.findOne({ _id: bookingId, shootId })
+      .populate([{ path: 'asset' }, { path: 'shoot' }])
+      .lean<AssetBooking & { asset: Asset; shoot: Shoot | null }>();
     if (!booking) throw notFound('Booking');
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.assetBooking.delete({ where: { id: bookingId } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const { deletedCount } = await this.database.models.AssetBooking.deleteOne({
+        _id: bookingId,
+      });
+      if (deletedCount === 0) throw notFound('Booking');
+      return this.activity.record({
         actorId: user.id,
         action: 'asset.released',
         entityType: 'asset',
@@ -331,13 +378,12 @@ export class ScheduleService {
   }
 
   async callCrew(shootId: string, input: CallCrew, user: SessionUser): Promise<ShootView> {
-    const shoot = await this.prisma.db.shoot.findUnique({ where: { id: shootId } });
+    const shoot = await this.database.models.Shoot.findById(shootId).lean<Shoot>();
     if (!shoot) throw notFound('Shoot');
     this.assertOpen(shoot);
-    const member = await this.prisma.db.teamMember.findUnique({
-      where: { id: input.teamMemberId },
-      include: { crewCalls: { include: { shoot: true } } },
-    });
+    const member = await this.database.models.TeamMember.findById(input.teamMemberId)
+      .populate({ path: 'crewCalls', populate: { path: 'shoot' } })
+      .lean<TeamMember & { crewCalls: (CrewCall & { shoot: Shoot })[] }>();
     if (!member) throw unprocessable('INVALID_MEMBER', 'Choose an existing team member.');
     if (!member.isActive) {
       throw unprocessable('MEMBER_INACTIVE', `${member.name} is no longer on the team.`);
@@ -356,20 +402,23 @@ export class ScheduleService {
     }
     // Approved leave is a scheduling constraint, like a double booking.
     // The query is a coarse pre-filter (a day of slack); every candidate is then tested exactly.
-    const leaves = await this.prisma.db.leaveRequest.findMany({
-      where: {
-        teamMemberId: member.id,
-        status: 'APPROVED',
-        startDate: { lte: shoot.endsAt },
-        endDate: { gte: new Date(shoot.startsAt.getTime() - 24 * 3600 * 1000) },
-      },
-    });
+    // Leave dates are whole days stored as UTC midnight, so the bounds are UTC days too.
+    const leaves = await this.database.models.LeaveRequest.find({
+      teamMemberId: member.id,
+      status: 'APPROVED',
+      startDate: { $lte: utcDay(shoot.endsAt) },
+      endDate: { $gte: utcDay(new Date(shoot.startsAt.getTime() - 24 * 3600 * 1000)) },
+    }).lean<LeaveRequest[]>();
     if (leaves.some((leave) => leaveOverlaps(leave, shoot)) && !input.allowOverlap) {
       throw conflict('CREW_ON_LEAVE', `${member.name} is on approved leave during this shoot.`);
     }
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.crewCall.create({ data: { shootId, teamMemberId: member.id, role: input.role } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      await this.database.models.CrewCall.create({
+        shootId,
+        teamMemberId: member.id,
+        role: input.role,
+      });
+      return this.activity.record({
         actorId: user.id,
         action: 'crew.called',
         entityType: 'member',
@@ -383,14 +432,14 @@ export class ScheduleService {
   }
 
   async removeCrew(shootId: string, crewCallId: string, user: SessionUser): Promise<ShootView> {
-    const call = await this.prisma.db.crewCall.findFirst({
-      where: { id: crewCallId, shootId },
-      include: { teamMember: true, shoot: true },
-    });
+    const call = await this.database.models.CrewCall.findOne({ _id: crewCallId, shootId })
+      .populate([{ path: 'teamMember' }, { path: 'shoot' }])
+      .lean<CrewCall & { teamMember: TeamMember; shoot: Shoot }>();
     if (!call) throw notFound('Crew call');
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.crewCall.delete({ where: { id: crewCallId } });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const { deletedCount } = await this.database.models.CrewCall.deleteOne({ _id: crewCallId });
+      if (deletedCount === 0) throw notFound('Crew call');
+      return this.activity.record({
         actorId: user.id,
         action: 'crew.released',
         entityType: 'member',
@@ -404,11 +453,12 @@ export class ScheduleService {
   }
 
   async updateAsset(id: string, input: UpdateAsset, user: SessionUser) {
-    const asset = await this.prisma.db.asset.findUnique({ where: { id } });
+    const asset = await this.database.models.Asset.findById(id).lean<Asset>();
     if (!asset) throw notFound('Asset');
-    const row = await this.prisma.db.$transaction(async (tx) => {
-      await tx.asset.update({ where: { id }, data: input });
-      return this.activity.record(tx, {
+    const row = await this.database.transaction(async () => {
+      const updated = await this.database.models.Asset.updateOne({ _id: id }, { $set: input });
+      if (updated.matchedCount === 0) throw notFound('Asset');
+      return this.activity.record({
         actorId: user.id,
         action: 'asset.updated',
         entityType: 'asset',

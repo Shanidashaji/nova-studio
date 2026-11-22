@@ -3,8 +3,12 @@
 const TZ = 'Asia/Kolkata';
 const DAY = 24 * 60 * 60 * 1000;
 
-/** ₹6.5L, ₹1.2Cr, ₹45K — compact rupee amounts in the Indian numbering system. */
-export function money(amount: number, { exact = false } = {}): string {
+/**
+ * ₹6.5L, ₹1.2Cr, ₹45K — compact rupee amounts in the Indian numbering system.
+ * `null` is an amount the API withheld from this user (see `canSeeProjectMoney`): shown as "—".
+ */
+export function money(amount: number | null, { exact = false } = {}): string {
+  if (amount === null) return '—';
   if (exact) return `₹${Math.round(amount).toLocaleString('en-IN')}`;
   const abs = Math.abs(amount);
   const sign = amount < 0 ? '−' : '';

@@ -9,6 +9,12 @@ describe('format', () => {
     expect(money(320000, { exact: true })).toBe('₹3,20,000');
   });
 
+  it('shows a dash for an amount the API withheld from this user', () => {
+    expect(money(null)).toBe('—');
+    expect(money(null, { exact: true })).toBe('—');
+    expect(money(0)).toBe('₹0');
+  });
+
   it('describes days relative to now', () => {
     const now = new Date('2026-11-22T06:00:00Z');
     expect(relativeDay('2026-11-22T10:00:00Z', now)).toBe('today');

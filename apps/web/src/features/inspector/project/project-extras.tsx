@@ -69,6 +69,15 @@ export function ProjectSchedule({ p }: { p: ProjectDetail }) {
 }
 
 export function ProjectBudget({ p }: { p: ProjectDetail }) {
+  // The API withholds the figures from roles that may not see what a production costs.
+  if (p.finance === null || p.budget === null || p.spent === null) {
+    return (
+      <InspectorSection title="Budget">
+        <p className="text-sm text-text-3">Budget and spend are not shown for your role.</p>
+      </InspectorSection>
+    );
+  }
+  const { finance } = p;
   const burn = p.budget ? p.spent / p.budget : 0;
   const gap = burn - p.progress;
   return (
@@ -77,8 +86,8 @@ export function ProjectBudget({ p }: { p: ProjectDetail }) {
         <KeyValue
           items={[
             ['Budget', money(p.budget, { exact: true })],
-            ['Spent', `${money(p.finance.expenses, { exact: true })} (${pct(burn)})`],
-            ['Invoiced', money(p.finance.income, { exact: true })],
+            ['Spent', `${money(finance.expenses, { exact: true })} (${pct(burn)})`],
+            ['Invoiced', money(finance.income, { exact: true })],
             ['Progress', pct(p.progress)],
           ]}
         />
@@ -99,11 +108,11 @@ export function ProjectBudget({ p }: { p: ProjectDetail }) {
         </p>
       </InspectorSection>
       <InspectorSection title="Expenses by category">
-        {p.finance.byCategory.length === 0 ? (
+        {finance.byCategory.length === 0 ? (
           <p className="text-sm text-text-3">No expenses recorded.</p>
         ) : (
           <ul className="flex flex-col gap-1.5">
-            {[...p.finance.byCategory]
+            {[...finance.byCategory]
               .sort((a, b) => b.amount - a.amount)
               .map((c) => (
                 <li key={c.category} className="flex items-center justify-between text-sm">

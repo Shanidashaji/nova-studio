@@ -71,7 +71,10 @@ export function ClientInspector({ id }: { id: string }) {
                 ['Contact', q.data.contactName ?? '—'],
                 ['Email', q.data.contactEmail ?? '—'],
                 ['Status', titleCase(q.data.status)],
-                ['Lifetime value', money(q.data.lifetimeValue)],
+                // Withheld from roles that may not see what productions cost.
+                ...(q.data.lifetimeValue === null
+                  ? []
+                  : ([['Lifetime value', money(q.data.lifetimeValue)]] as [string, string][])),
                 [
                   'Waiting on them',
                   q.data.pendingApprovals ? `${q.data.pendingApprovals} approval(s)` : 'Nothing',
@@ -91,7 +94,8 @@ export function ClientInspector({ id }: { id: string }) {
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm">{p.title}</span>
                       <span className="block text-2xs text-text-3">
-                        {p.code} · {p.stage?.label ?? 'Delivered'} · {money(p.budget)}
+                        {p.code} · {p.stage?.label ?? 'Delivered'}
+                        {p.budget === null ? null : ` · ${money(p.budget)}`}
                       </span>
                     </span>
                     <Badge tone={healthTone[p.health.band]}>{p.health.score}</Badge>

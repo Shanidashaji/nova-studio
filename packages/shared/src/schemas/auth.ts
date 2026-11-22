@@ -129,6 +129,17 @@ export const PERMISSION_GROUPS: { group: string; items: { key: Permission; label
   },
 ];
 
+/**
+ * Who may see what a production costs: its budget, spend, income and cost breakdown, and the
+ * client lifetime value that is the sum of those budgets.
+ *
+ * Finance readers, and whoever creates and edits productions (they type the budget in). Every
+ * other role that can open the workspace sees the production without its money. The API removes
+ * the figures for those callers; this rule is the one place that decides it.
+ */
+export const canSeeProjectMoney = (permissions: readonly Permission[]): boolean =>
+  permissions.includes('finance:read') || permissions.includes('project:write');
+
 /** Role keys are data (ADR-0009); these are the roles the seed creates. */
 export const RoleKey = z
   .string()

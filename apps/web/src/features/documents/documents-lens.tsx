@@ -135,7 +135,7 @@ function UploadDialog({
   const submit = async () => {
     const file = fileRef.current?.files?.[0];
     if (!file) return toast.error('Choose a file to upload.');
-    if (file.size > DOCUMENT_MAX_BYTES) return toast.error('Files can be at most 20 MB.');
+    if (file.size > DOCUMENT_MAX_BYTES) return toast.error('Files can be at most 4 MB.');
     const form = new FormData();
     form.set('title', title);
     form.set('category', category);
@@ -167,7 +167,7 @@ function UploadDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="Upload a document"
-      description="PDF, images, text, CSV or Office files up to 20 MB. Stored privately; the file type is checked against its contents."
+      description="PDF, images, text, CSV or Office files up to 4 MB. Stored privately; the file type is checked against its contents."
       footer={
         <>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>

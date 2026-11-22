@@ -6,9 +6,18 @@ import {
   type MemberView,
   type WorkloadWeek,
 } from '@nova/shared';
-import type { Prisma } from '@nova/db';
+import type {
+  CrewCall,
+  PopulateOptions,
+  Project,
+  ProjectMember,
+  Shoot,
+  Task,
+  TaskDependency,
+  TeamMember,
+} from '@nova/db';
 import { notFound } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { iso, memberRef, toTaskView } from '../projects/project.mapper';
 
 const WEEKS = 4;
@@ -41,23 +50,46 @@ export function shootDaysWithin(
   return Math.max(1, days);
 }
 
-const memberInclude = {
-  tasks: {
-    where: { status: { not: 'DONE' }, project: { status: { in: ['ACTIVE', 'ON_HOLD'] } } },
-    include: {
-      assignee: true,
-      dependsOn: { select: { dependsOnId: true } },
-      project: { select: { id: true, code: true, title: true } },
-    },
-    orderBy: { dueDate: 'asc' },
+/** Relations a member view needs; open tasks are limited to live (active / on hold) projects. */
+const memberPopulate = (liveProjectIds: string[]): PopulateOptions[] => [
+  {
+    path: 'tasks',
+    match: { status: { $ne: 'DONE' }, projectId: { $in: liveProjectIds } },
+    populate: [
+      { path: 'assignee' },
+      { path: 'dependsOn' },
+      { path: 'project', select: { code: 1, title: 1 } },
+    ],
   },
-  projectRoles: {
-    include: { project: { select: { id: true, code: true, title: true, status: true } } },
-  },
-  crewCalls: { include: { shoot: true } },
-} satisfies Prisma.TeamMemberInclude;
+  { path: 'projectRoles', populate: { path: 'project', select: { code: 1, title: 1, status: 1 } } },
+  { path: 'crewCalls', populate: { path: 'shoot' } },
+];
 
-type MemberRow = Prisma.TeamMemberGetPayload<{ include: typeof memberInclude }>;
+type MemberRow = TeamMember & {
+  tasks: (Task & {
+    assignee: TeamMember | null;
+    dependsOn: TaskDependency[];
+    project: Pick<Project, '_id' | 'id' | 'code' | 'title'>;
+  })[];
+  projectRoles: (ProjectMember & {
+    project: Pick<Project, '_id' | 'id' | 'code' | 'title' | 'status'>;
+  })[];
+  crewCalls: (CrewCall & { shoot: Shoot })[];
+};
+
+/** Open tasks by due date, undated last (the former Postgres `ORDER BY dueDate ASC`). */
+function sortTasks(m: MemberRow): MemberRow {
+  m.tasks.sort((a, b) =>
+    a.dueDate === null
+      ? b.dueDate === null
+        ? 0
+        : 1
+      : b.dueDate === null
+        ? -1
+        : a.dueDate.getTime() - b.dueDate.getTime(),
+  );
+  return m;
+}
 
 /**
  * Workload over four rolling 7-day windows starting today = estimated hours of open tasks due in
@@ -100,7 +132,13 @@ export function computeWeeks(m: MemberRow, now: Date): WorkloadWeek[] {
 
 @Injectable()
 export class TeamService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly database: DatabaseService) {}
+
+  private async liveProjectIds(): Promise<string[]> {
+    return this.database.models.Project.distinct('_id', {
+      status: { $in: ['ACTIVE', 'ON_HOLD'] },
+    });
+  }
 
   private toView(m: MemberRow, now: Date): MemberView {
     return {
@@ -133,21 +171,26 @@ export class TeamService {
   }
 
   async list(): Promise<MemberView[]> {
-    const members = await this.prisma.db.teamMember.findMany({
-      where: { isActive: true },
-      include: memberInclude,
-      orderBy: { name: 'asc' },
-    });
+    const members = await this.database.models.TeamMember.find({ isActive: true })
+      .sort({ name: 1 })
+      .populate(memberPopulate(await this.liveProjectIds()))
+      .lean<MemberRow[]>();
     const now = new Date();
-    return members.map((m) => this.toView(m, now));
+    return members.map((m) => this.toView(sortTasks(m), now));
   }
 
   async get(id: string): Promise<MemberDetail> {
-    const m = await this.prisma.db.teamMember.findUnique({ where: { id }, include: memberInclude });
-    if (!m) throw notFound('Team member');
+    const row = await this.database.models.TeamMember.findById(id)
+      .populate(memberPopulate(await this.liveProjectIds()))
+      .lean<MemberRow>();
+    if (!row) throw notFound('Team member');
+    const m = sortTasks(row);
     return {
       ...this.toView(m, new Date()),
-      tasks: m.tasks.map((t) => ({ ...toTaskView(t), project: t.project })),
+      tasks: m.tasks.map((t) => ({
+        ...toTaskView(t),
+        project: { id: t.project.id, code: t.project.code, title: t.project.title },
+      })),
     };
   }
 }

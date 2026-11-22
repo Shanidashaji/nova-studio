@@ -1,6 +1,6 @@
 # ADR-0003 — PostgreSQL everywhere; embedded server for local development
 
-**Status:** Accepted (2026-11-22)
+**Status:** Superseded by [ADR-0014](0014-mongodb-and-single-vercel-app.md) — originally accepted (2026-11-22)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # NOVA REST API (v1)
 
-Base path: `/api/v1`. In development the web app forwards `/api/*` to the API, so the same paths work on `http://localhost:3100` and `http://localhost:4000`.
+Base path: `/api/v1`, served by the web app (`http://localhost:3100` in development, your Vercel domain in production). A standalone API (`pnpm --filter @nova/api start`) serves the same paths on `API_PORT`.
 
 Request bodies and query strings are validated with the Zod schemas in [`packages/shared/src/schemas/requests.ts`](../../packages/shared/src/schemas/requests.ts); response shapes are the types in [`views.ts`](../../packages/shared/src/schemas/views.ts). The schema name is given for each endpoint below.
 
@@ -145,51 +145,51 @@ Every response carries an `x-request-id` header.
 # Sign in (keeps the cookie in jar.txt)
 curl -c jar.txt -H 'content-type: application/json' \
   -d '{"email":"admin@nova.local","password":"<SEED_ADMIN_PASSWORD>"}' \
-  http://localhost:4000/api/v1/auth/login
+  http://localhost:3100/api/v1/auth/login
 
 # What needs attention
-curl -b jar.txt http://localhost:4000/api/v1/workspace/pulse
+curl -b jar.txt http://localhost:3100/api/v1/workspace/pulse
 
 # Try to move a production on — returns 422 with the blocking tasks
 curl -b jar.txt -H 'content-type: application/json' -d '{"direction":"FORWARD"}' \
-  http://localhost:4000/api/v1/projects/<id>/transitions
+  http://localhost:3100/api/v1/projects/<id>/transitions
 
 # Ask NOVA, then confirm the proposal it returns
 curl -b jar.txt -H 'content-type: application/json' \
   -d '{"message":"Create a task \"Archive rushes\" for Woven Light due Friday"}' \
-  http://localhost:4000/api/v1/assistant/messages
-curl -b jar.txt -X POST http://localhost:4000/api/v1/assistant/actions/<proposalId>/confirm
+  http://localhost:3100/api/v1/assistant/messages
+curl -b jar.txt -X POST http://localhost:3100/api/v1/assistant/actions/<proposalId>/confirm
 ```
 
 ## ERP endpoints (Phases 9–13)
 
 Every route needs a session; the permission column is enforced by `PermissionsGuard` (`any of` = `@RequireAnyPermission`). Request bodies are the Zod schemas in `packages/shared/src/schemas/erp-requests.ts`; responses are the views in `erp-views.ts`.
 
-| Area | Routes | Permission |
-| --- | --- | --- |
-| Users & roles | `GET/POST /admin/users`, `PATCH /admin/users/:id`, `POST /admin/users/:id/password`, `DELETE /admin/users/:id/sessions` | `user:manage` (no granting or managing a role with permissions you lack) |
-| | `GET /admin/roles` · `POST /admin/roles`, `PATCH/DELETE /admin/roles/:id` | any of `user:manage`, `role:manage` · `role:manage` |
-| Approval rules | `GET /admin/approval-rules` · `POST`, `PUT/DELETE /admin/approval-rules/:id` | any approver permission · `role:manage` |
-| My account | `GET /me/sessions`, `DELETE /me/sessions/:id`, `POST /me/password`, `GET/PUT /me/notification-preferences` | session |
-| Approvals | `GET /approval-requests?scope=waiting\|requested\|all`, `GET /approval-requests/:id`, `POST /approval-requests/:id/decision` | `workspace:read`; deciding needs the step's permission, not being an owner of the request, and not having decided an earlier step |
-| Vendors | `GET /vendors`, `GET /vendors/:id` · `POST /vendors`, `PATCH /vendors/:id` | any of `finance:read`, `vendor:write`, `procurement:request` · `vendor:write` |
-| Expenses | `GET /expenses[?status&projectId&mine=true]`, `GET /expenses/:id` | any of `expense:submit`, `finance:read` (own only without `finance:read`) |
-| | `POST /expenses`, `PATCH /expenses/:id`, `POST /expenses/:id/submit\|withdraw`, `DELETE /expenses/:id` | `expense:submit` |
-| | `POST /expenses/:id/pay` (posts the ledger entry) | `finance:write` |
-| Invoices | `GET /finance/overview`, `GET /invoices[?status&clientId&projectId&overdue=true]`, `GET /invoices/:id` | `finance:read` |
-| | `POST /invoices`, `PATCH /invoices/:id` (drafts), `POST /invoices/:id/send\|void` | `invoice:write` |
-| | `POST /invoices/:id/payments` (≤ balance; posts the ledger entry) | `finance:write` |
-| Procurement | `GET /purchase-requests`, `GET /purchase-requests/:id`, `GET /purchase-orders`, `GET /purchase-orders/:id` | any procurement permission or `finance:read` |
-| | `POST /purchase-requests`, `POST /purchase-requests/:id/submit` · `…/cancel` | `procurement:request` · requester or `procurement:order` |
-| | `POST /purchase-requests/:id/quotes`, `…/quotes/:quoteId/select` | `procurement:order`/`procurement:approve` (quotes also `vendor:write`) |
-| | `POST /purchase-orders` (≤ approved amount), `POST /purchase-orders/:id/receive\|cancel` | `procurement:order` |
-| Inventory | `GET /stock`, `GET /stock/:id` · `POST /stock`, `PATCH /stock/:id`, `POST /stock/:id/movements` | `workspace:read` · `inventory:write` |
-| Equipment | `GET /assets/:id` · `PATCH /assets/:id/details`, `POST /assets/:id/maintenance`, `POST /assets/:id/maintenance/:mid/complete` | `workspace:read` · `asset:write` |
-| People | `GET /hr/employees` (records only with `hr:read`), `GET /hr/departments`, `GET/POST /hr/leave`, `POST /hr/leave/:id/cancel`, `GET/POST /hr/attendance` | `workspace:read` (self-service rules in `HrService`) |
-| | `PATCH /hr/employees/:id`, `POST /hr/departments`, `PUT /hr/departments/:id` · `PUT /hr/employees/:id/record` | `hr:write` · `hr:read` + `hr:write` |
-| Studios | `GET /studios` · `POST /studio-bookings`, `PATCH /studio-bookings/:id` | `workspace:read` · `studio:write` |
-| Documents | `GET /documents`, `GET /documents/:id`, `GET /documents/:id/versions/:v/file` · `POST /documents`, `POST /documents/:id/versions` (multipart `file`) | `document:read` · `document:write` (confidential/HR/finance visibility in `DocumentsService`) |
-| Project plan & CRM | `GET/POST /projects/:id/milestones`, `PATCH …/milestones/:mid`, `GET/POST /projects/:id/risks`, `PUT …/risks/:rid` | `workspace:read` · `project:write` |
-| | `GET/POST /clients/:id/contacts`, `DELETE …/contacts/:cid` · `PATCH /leads/:id/ownership` · `POST /leads/:id/convert` | `client:write` · `sales:write` · `sales:write` + `project:write` |
+| Area               | Routes                                                                                                                                                 | Permission                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| Users & roles      | `GET/POST /admin/users`, `PATCH /admin/users/:id`, `POST /admin/users/:id/password`, `DELETE /admin/users/:id/sessions`                                | `user:manage` (no granting or managing a role with permissions you lack)                                                          |
+|                    | `GET /admin/roles` · `POST /admin/roles`, `PATCH/DELETE /admin/roles/:id`                                                                              | any of `user:manage`, `role:manage` · `role:manage`                                                                               |
+| Approval rules     | `GET /admin/approval-rules` · `POST`, `PUT/DELETE /admin/approval-rules/:id`                                                                           | any approver permission · `role:manage`                                                                                           |
+| My account         | `GET /me/sessions`, `DELETE /me/sessions/:id`, `POST /me/password`, `GET/PUT /me/notification-preferences`                                             | session                                                                                                                           |
+| Approvals          | `GET /approval-requests?scope=waiting\|requested\|all`, `GET /approval-requests/:id`, `POST /approval-requests/:id/decision`                           | `workspace:read`; deciding needs the step's permission, not being an owner of the request, and not having decided an earlier step |
+| Vendors            | `GET /vendors`, `GET /vendors/:id` · `POST /vendors`, `PATCH /vendors/:id`                                                                             | any of `finance:read`, `vendor:write`, `procurement:request` · `vendor:write`                                                     |
+| Expenses           | `GET /expenses[?status&projectId&mine=true]`, `GET /expenses/:id`                                                                                      | any of `expense:submit`, `finance:read` (own only without `finance:read`)                                                         |
+|                    | `POST /expenses`, `PATCH /expenses/:id`, `POST /expenses/:id/submit\|withdraw`, `DELETE /expenses/:id`                                                 | `expense:submit`                                                                                                                  |
+|                    | `POST /expenses/:id/pay` (posts the ledger entry)                                                                                                      | `finance:write`                                                                                                                   |
+| Invoices           | `GET /finance/overview`, `GET /invoices[?status&clientId&projectId&overdue=true]`, `GET /invoices/:id`                                                 | `finance:read`                                                                                                                    |
+|                    | `POST /invoices`, `PATCH /invoices/:id` (drafts), `POST /invoices/:id/send\|void`                                                                      | `invoice:write`                                                                                                                   |
+|                    | `POST /invoices/:id/payments` (≤ balance; posts the ledger entry)                                                                                      | `finance:write`                                                                                                                   |
+| Procurement        | `GET /purchase-requests`, `GET /purchase-requests/:id`, `GET /purchase-orders`, `GET /purchase-orders/:id`                                             | any procurement permission or `finance:read`                                                                                      |
+|                    | `POST /purchase-requests`, `POST /purchase-requests/:id/submit` · `…/cancel`                                                                           | `procurement:request` · requester or `procurement:order`                                                                          |
+|                    | `POST /purchase-requests/:id/quotes`, `…/quotes/:quoteId/select`                                                                                       | `procurement:order`/`procurement:approve` (quotes also `vendor:write`)                                                            |
+|                    | `POST /purchase-orders` (≤ approved amount), `POST /purchase-orders/:id/receive\|cancel`                                                               | `procurement:order`                                                                                                               |
+| Inventory          | `GET /stock`, `GET /stock/:id` · `POST /stock`, `PATCH /stock/:id`, `POST /stock/:id/movements`                                                        | `workspace:read` · `inventory:write`                                                                                              |
+| Equipment          | `GET /assets/:id` · `PATCH /assets/:id/details`, `POST /assets/:id/maintenance`, `POST /assets/:id/maintenance/:mid/complete`                          | `workspace:read` · `asset:write`                                                                                                  |
+| People             | `GET /hr/employees` (records only with `hr:read`), `GET /hr/departments`, `GET/POST /hr/leave`, `POST /hr/leave/:id/cancel`, `GET/POST /hr/attendance` | `workspace:read` (self-service rules in `HrService`)                                                                              |
+|                    | `PATCH /hr/employees/:id`, `POST /hr/departments`, `PUT /hr/departments/:id` · `PUT /hr/employees/:id/record`                                          | `hr:write` · `hr:read` + `hr:write`                                                                                               |
+| Studios            | `GET /studios` · `POST /studio-bookings`, `PATCH /studio-bookings/:id`                                                                                 | `workspace:read` · `studio:write`                                                                                                 |
+| Documents          | `GET /documents`, `GET /documents/:id`, `GET /documents/:id/versions/:v/file` · `POST /documents`, `POST /documents/:id/versions` (multipart `file`)   | `document:read` · `document:write` (confidential/HR/finance visibility in `DocumentsService`)                                     |
+| Project plan & CRM | `GET/POST /projects/:id/milestones`, `PATCH …/milestones/:mid`, `GET/POST /projects/:id/risks`, `PUT …/risks/:rid`                                     | `workspace:read` · `project:write`                                                                                                |
+|                    | `GET/POST /clients/:id/contacts`, `DELETE …/contacts/:cid` · `PATCH /leads/:id/ownership` · `POST /leads/:id/convert`                                  | `client:write` · `sales:write` · `sales:write` + `project:write`                                                                  |
 
 New error codes include `STUDIO_CONFLICT`, `CREW_ON_LEAVE`, `OVER_APPROVED_AMOUNT`, `INSUFFICIENT_STOCK`, `OVERPAYMENT`, `APPROVAL_CLOSED`, `FILE_REJECTED`, `FINANCE_ONLY`, `LEAVE_OVERLAP`, `LEAVE_TOO_OLD`, `LAST_SUPER_ADMIN`, `ROLE_IN_USE`, `LEAD_CONVERTED`.

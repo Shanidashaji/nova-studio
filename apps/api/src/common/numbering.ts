@@ -1,12 +1,11 @@
-import { Prisma } from '@nova/db';
-import { nextNumber } from '@nova/shared';
-import type { Db } from '../database/prisma.service';
+import type { Model } from '@nova/db';
+import type { DatabaseService } from '../database/database.service';
 
 const SEQUENCES = {
-  expense: { table: 'Expense', prefix: () => 'EXP-', width: 4 },
-  invoice: { table: 'Invoice', prefix: () => `NM-INV-${studioYear()}-`, width: 3 },
-  purchaseRequest: { table: 'PurchaseRequest', prefix: () => 'PR-', width: 4 },
-  purchaseOrder: { table: 'PurchaseOrder', prefix: () => 'PO-', width: 4 },
+  expense: { model: 'Expense', prefix: () => 'EXP-', width: 4 },
+  invoice: { model: 'Invoice', prefix: () => `NM-INV-${studioYear()}-`, width: 3 },
+  purchaseRequest: { model: 'PurchaseRequest', prefix: () => 'PR-', width: 4 },
+  purchaseOrder: { model: 'PurchaseOrder', prefix: () => 'PO-', width: 4 },
 } as const;
 
 /** The calendar year in the studio's timezone (IST), whatever the server's own clock zone is. */
@@ -18,19 +17,49 @@ function studioYear(now = new Date()): string {
 
 export type Sequence = keyof typeof SEQUENCES;
 
+/** The numeric tail of the highest existing number with this prefix (0 when there is none). */
+async function highestExisting(
+  database: DatabaseService,
+  model: (typeof SEQUENCES)[Sequence]['model'],
+  prefix: string,
+): Promise<number> {
+  // The four numbered collections share the `number` field; one model type covers them.
+  const rows = await (database.models[model] as unknown as Model<{ number: string }>)
+    .find(
+      { number: { $regex: `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` } },
+      { number: 1 },
+    )
+    .lean<{ number: string }[]>();
+  let max = 0;
+  for (const { number } of rows) {
+    const n = Number(number.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
 /**
- * Next human-readable document number (EXP-0042, NM-INV-2026-014…). Must run inside a
- * transaction: a transaction-scoped advisory lock serialises concurrent creators so two requests
- * never read the same "last" number. "Last" is the highest number, not the last in text order:
- * once a sequence outgrows its padding (…-999 → …-1000) the longer number must win, so rows are
- * ordered by length first.
+ * Next human-readable document number (EXP-0042, NM-INV-2026-014…). An atomic counter per
+ * prefix serialises concurrent creators, so two requests never get the same number; it never
+ * falls below the highest number already stored (numeric order, so …-999 is followed by …-1000).
+ * Call it inside the transaction that inserts the record.
  */
-export async function allocateNumber(tx: Db, sequence: Sequence): Promise<string> {
-  const { table, prefix, width } = SEQUENCES[sequence];
+export async function allocateNumber(
+  database: DatabaseService,
+  sequence: Sequence,
+): Promise<string> {
+  const { model, prefix, width } = SEQUENCES[sequence];
   const p = prefix();
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`nova-seq-${sequence}`}))`;
-  const rows = await tx.$queryRaw<{ number: string }[]>(
-    Prisma.sql`SELECT "number" FROM ${Prisma.raw(`"${table}"`)} WHERE "number" LIKE ${`${p}%`} ORDER BY length("number") DESC, "number" DESC LIMIT 1`,
-  );
-  return nextNumber(p, rows[0]?.number, width);
+  const floor = await highestExisting(database, model, p);
+  const value = await database.nextSequence(`number:${p}`, floor);
+  return `${p}${String(value).padStart(width, '0')}`;
+}
+
+/** Project codes follow NM-YY-NNN; the sequence continues from the highest existing code. */
+export async function allocateProjectCode(database: DatabaseService, now: Date): Promise<string> {
+  const year = String(now.getFullYear()).slice(2);
+  const codes = await database.models.Project.find({}, { code: 1 }).lean<{ code: string }[]>();
+  const max = codes.reduce((n, { code }) => Math.max(n, Number(/(\d+)$/.exec(code)?.[1] ?? 0)), 0);
+  const value = await database.nextSequence('project-code', max);
+  return `NM-${year}-${String(value).padStart(3, '0')}`;
 }

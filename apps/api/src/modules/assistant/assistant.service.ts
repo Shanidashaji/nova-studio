@@ -11,9 +11,9 @@ import type {
   TaskStatus,
 } from '@nova/shared';
 import { baseLanguage, detectLanguage } from '@nova/shared';
-import type { Prisma } from '@nova/db';
+import type { AssistantAction, AssistantInteraction, Project, ProjectStage, Task } from '@nova/db';
 import { AppError, conflict, forbidden, notFound } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ClientsService } from '../clients/clients.service';
 import { ProjectsService } from '../projects/projects.service';
 import { TasksService } from '../tasks/tasks.service';
@@ -33,7 +33,11 @@ const REQUIRED: Record<ProposalKind, Permission> = {
   LOG_INTERACTION: 'client:write',
 };
 
-type ActionRow = Prisma.AssistantActionGetPayload<object>;
+type ActionRow = AssistantAction;
+type ActionData = Pick<
+  AssistantAction,
+  'interactionId' | 'kind' | 'payload' | 'preview' | 'targetVersion'
+>;
 
 /**
  * NOVA orchestration (ADR-0005): picks a provider, persists the conversation, stores proposals,
@@ -45,7 +49,7 @@ export class AssistantService {
   private readonly logger = new Logger('NOVA');
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly demo: DemoProvider,
     private readonly claude: ClaudeProvider,
     private readonly projects: ProjectsService,
@@ -61,12 +65,11 @@ export class AssistantService {
   }
 
   async history(user: SessionUser): Promise<AssistantHistoryItem[]> {
-    const rows = await this.prisma.db.assistantInteraction.findMany({
-      where: { userId: user.id },
-      include: { actions: { orderBy: { createdAt: 'asc' } } },
-      orderBy: { createdAt: 'desc' },
-      take: 40,
-    });
+    const rows = await this.database.models.AssistantInteraction.find({ userId: user.id })
+      .sort({ createdAt: -1 })
+      .limit(40)
+      .populate({ path: 'actions', options: { sort: { createdAt: 1 } } })
+      .lean<(AssistantInteraction & { actions: AssistantAction[] })[]>();
     return rows.reverse().map((r) => ({
       id: r.id,
       role: r.role,
@@ -79,12 +82,11 @@ export class AssistantService {
   }
 
   async message(user: SessionUser, req: AssistantMessageRequest): Promise<AssistantReply> {
-    const recent = await this.prisma.db.assistantInteraction.findMany({
-      where: { userId: user.id },
-      orderBy: { createdAt: 'desc' },
-      take: 8,
-      select: { role: true, content: true },
-    });
+    const recent = await this.database.models.AssistantInteraction.find({ userId: user.id })
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .select({ role: 1, content: 1 })
+      .lean<Pick<AssistantInteraction, 'id' | 'role' | 'content'>[]>();
     // A hint for the providers (and the record): the model itself decides the reply language.
     const detected = detectLanguage(req.message);
     const speechLanguage = req.channel === 'voice' ? (req.speechLanguage ?? null) : null;
@@ -123,32 +125,33 @@ export class AssistantService {
       result.content = `_Claude is unavailable right now — answered in demo mode._\n${result.content}`;
     }
 
-    const { assistant, actions } = await this.prisma.db.$transaction(async (tx) => {
-      await tx.assistantInteraction.create({
-        data: {
-          userId: user.id,
-          role: 'USER',
-          content: req.message,
-          focusContext: req.context ?? undefined,
-          provider,
-          language: userLanguage?.code ?? null,
-          languageSource: userLanguage?.source ?? null,
-        },
+    const { AssistantInteraction: Interactions, AssistantAction: Actions } = this.database.models;
+    // Writes are awaited one after another: every call joins the transaction, which MongoDB may
+    // re-run on a transient conflict (so the result arrays are rebuilt inside the callback).
+    const { assistant, actions } = await this.database.transaction(async () => {
+      await Interactions.create({
+        userId: user.id,
+        role: 'USER',
+        content: req.message,
+        focusContext: req.context ?? undefined,
+        provider,
+        language: userLanguage?.code ?? null,
+        languageSource: userLanguage?.source ?? null,
       });
-      const assistant = await tx.assistantInteraction.create({
-        data: {
+      const assistant = (
+        await Interactions.create({
           userId: user.id,
           role: 'ASSISTANT',
           content: result.content,
-          references: result.references as unknown as Prisma.InputJsonValue,
+          references: result.references,
           provider,
           language: result.language?.code ?? null,
           languageSource: result.language?.source ?? null,
-        },
-      });
+        })
+      ).toObject() as AssistantInteraction;
       const actions: ActionRow[] = [];
       for (const p of result.proposals)
-        actions.push(await tx.assistantAction.create({ data: this.actionData(assistant.id, p) }));
+        actions.push((await Actions.create(this.actionData(assistant.id, p))).toObject());
       return { assistant, actions };
     });
 
@@ -172,24 +175,21 @@ export class AssistantService {
       throw forbidden('Your role cannot apply this change.');
 
     if (await this.isStale(action)) {
-      const stale = await this.prisma.db.assistantAction.update({
-        where: { id: actionId },
-        data: {
-          status: 'STALE',
-          resolvedAt: new Date(),
-          error: 'The target changed after this was proposed. Ask NOVA again for a fresh proposal.',
-        },
+      const stale = await this.setAction(actionId, {
+        status: 'STALE',
+        resolvedAt: new Date(),
+        error: 'The target changed after this was proposed. Ask NOVA again for a fresh proposal.',
       });
       return this.toProposal(stale);
     }
 
     // Claim the proposal before applying it: of two simultaneous confirmations (a double
     // click, two tabs) exactly one may run the change.
-    const claimed = await this.prisma.db.assistantAction.updateMany({
-      where: { id: actionId, status: 'PROPOSED' },
-      data: { status: 'CONFIRMED', resolvedAt: new Date() },
-    });
-    if (claimed.count === 0) {
+    const claimed = await this.database.models.AssistantAction.updateMany(
+      { _id: actionId, status: 'PROPOSED' },
+      { $set: { status: 'CONFIRMED', resolvedAt: new Date() } },
+    );
+    if (claimed.matchedCount === 0) {
       throw conflict('ALREADY_RESOLVED', 'This proposal was already resolved.');
     }
 
@@ -253,10 +253,7 @@ export class AssistantService {
           break;
         }
       }
-      const done = await this.prisma.db.assistantAction.update({
-        where: { id: actionId },
-        data: { resultEntityId },
-      });
+      const done = await this.setAction(actionId, { resultEntityId });
       return this.toProposal(done);
     } catch (error) {
       // A domain rule (AppError) explains itself to the user. Anything else is a fault: it is
@@ -268,13 +265,10 @@ export class AssistantService {
           error instanceof Error ? error.stack : String(error),
         );
       }
-      const failed = await this.prisma.db.assistantAction.update({
-        where: { id: actionId },
-        data: {
-          status: 'FAILED',
-          resolvedAt: new Date(),
-          error: expected ? error.message : 'The change could not be applied.',
-        },
+      const failed = await this.setAction(actionId, {
+        status: 'FAILED',
+        resolvedAt: new Date(),
+        error: expected ? error.message : 'The change could not be applied.',
       });
       return this.toProposal(failed);
     }
@@ -282,23 +276,38 @@ export class AssistantService {
 
   async cancel(actionId: string, user: SessionUser): Promise<AssistantProposal> {
     await this.load(actionId, user);
-    const cancelled = await this.prisma.db.assistantAction.updateMany({
-      where: { id: actionId, status: 'PROPOSED' },
-      data: { status: 'CANCELLED', resolvedAt: new Date() },
-    });
-    if (cancelled.count === 0) {
+    const cancelled = await this.database.models.AssistantAction.updateMany(
+      { _id: actionId, status: 'PROPOSED' },
+      { $set: { status: 'CANCELLED', resolvedAt: new Date() } },
+    );
+    if (cancelled.matchedCount === 0) {
       throw conflict('ALREADY_RESOLVED', 'This proposal was already resolved.');
     }
-    const row = await this.prisma.db.assistantAction.findUniqueOrThrow({ where: { id: actionId } });
+    const row = await this.database.models.AssistantAction.findById(actionId).lean<ActionRow>();
+    if (!row) throw notFound('Proposal');
     return this.toProposal(row);
   }
 
+  /** Writes fields of a proposal and returns it (404 if it vanished meanwhile). */
+  private async setAction(
+    actionId: string,
+    data: Partial<Pick<AssistantAction, 'status' | 'resolvedAt' | 'error' | 'resultEntityId'>>,
+  ): Promise<ActionRow> {
+    const row = await this.database.models.AssistantAction.findByIdAndUpdate(
+      actionId,
+      { $set: data },
+      { new: true },
+    ).lean<ActionRow>();
+    if (!row) throw notFound('Proposal');
+    return row;
+  }
+
   private async load(actionId: string, user: SessionUser) {
-    const action = await this.prisma.db.assistantAction.findUnique({
-      where: { id: actionId },
-      include: { interaction: { select: { userId: true } } },
-    });
-    if (!action || action.interaction.userId !== user.id) throw notFound('Proposal');
+    const action = await this.database.models.AssistantAction.findById(actionId)
+      .populate({ path: 'interaction', select: { userId: 1 } })
+      .lean<ActionRow & { interaction: Pick<AssistantInteraction, 'id' | 'userId'> | null }>();
+    if (!action || !action.interaction || action.interaction.userId !== user.id)
+      throw notFound('Proposal');
     if (action.status !== 'PROPOSED')
       throw conflict(
         'ALREADY_RESOLVED',
@@ -310,35 +319,32 @@ export class AssistantService {
   private async isStale(action: ActionRow): Promise<boolean> {
     if (!action.targetVersion) return false;
     const p = action.payload as Record<string, unknown>;
+    const { Task: Tasks, Project: Projects, ProjectStage: Stages } = this.database.models;
+    // `targetVersion` is the target's `updatedAt` (ISO) when proposed; the schema hooks keep
+    // `updatedAt` current on every write, so the same ISO comparison detects a change.
     const current =
       action.kind === 'UPDATE_TASK'
-        ? await this.prisma.db.task.findUnique({
-            where: { id: p.taskId as string },
-            select: { updatedAt: true },
-          })
+        ? await Tasks.findById(p.taskId as string)
+            .select({ updatedAt: 1 })
+            .lean<Pick<Task, 'id' | 'updatedAt'>>()
         : action.kind === 'ADVANCE_PROJECT'
-          ? await this.prisma.db.project.findUnique({
-              where: { id: p.projectId as string },
-              select: { updatedAt: true },
-            })
+          ? await Projects.findById(p.projectId as string)
+              .select({ updatedAt: 1 })
+              .lean<Pick<Project, 'id' | 'updatedAt'>>()
           : null;
     if (action.kind === 'ADVANCE_PROJECT') {
       // Stage changes don't touch project.updatedAt, so also check the stage is still current.
       const stage = p.fromStageId
-        ? await this.prisma.db.projectStage.findUnique({
-            where: { id: p.fromStageId as string },
-            select: { status: true },
-          })
+        ? await Stages.findById(p.fromStageId as string)
+            .select({ status: 1 })
+            .lean<Pick<ProjectStage, 'id' | 'status'>>()
         : null;
       if (!stage || (stage.status !== 'ACTIVE' && stage.status !== 'BLOCKED')) return true;
     }
     return !current || current.updatedAt.toISOString() !== action.targetVersion;
   }
 
-  private actionData(
-    interactionId: string,
-    p: ProposalDraft,
-  ): Prisma.AssistantActionUncheckedCreateInput {
+  private actionData(interactionId: string, p: ProposalDraft): ActionData {
     return {
       interactionId,
       kind: p.kind,

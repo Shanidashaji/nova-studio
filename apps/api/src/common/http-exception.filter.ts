@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { isDuplicateKeyError, isValidationFailure } from '@nova/db';
 import { AppError } from './errors';
 
 const STATUS_CODES: Record<number, string> = {
@@ -19,16 +20,27 @@ const STATUS_CODES: Record<number, string> = {
   429: 'RATE_LIMITED',
 };
 
-/** Prisma error codes we translate into HTTP semantics instead of 500s. */
-const PRISMA_CODES: Record<string, [HttpStatus, string, string]> = {
-  P2025: [HttpStatus.NOT_FOUND, 'NOT_FOUND', 'The requested record does not exist.'],
-  P2002: [HttpStatus.CONFLICT, 'ALREADY_EXISTS', 'A record with these details already exists.'],
-  P2003: [
-    HttpStatus.UNPROCESSABLE_ENTITY,
-    'INVALID_REFERENCE',
-    'A referenced record does not exist.',
-  ],
-};
+/** Database errors we translate into HTTP semantics instead of 500s. */
+function databaseError(e: unknown): [HttpStatus, string, string] | null {
+  if (isDuplicateKeyError(e)) {
+    return [HttpStatus.CONFLICT, 'ALREADY_EXISTS', 'A record with these details already exists.'];
+  }
+  const name = (e as { name?: unknown } | null)?.name;
+  if (name === 'RecordNotFoundError') {
+    return [HttpStatus.NOT_FOUND, 'NOT_FOUND', 'The requested record does not exist.'];
+  }
+  if (name === 'ReferenceConflictError') {
+    return [
+      HttpStatus.CONFLICT,
+      'IN_USE',
+      'Other records still refer to this one, so it cannot be deleted.',
+    ];
+  }
+  if (name === 'ValidationError' || name === 'CastError' || isValidationFailure(e)) {
+    return [HttpStatus.UNPROCESSABLE_ENTITY, 'INVALID_INPUT', 'The submitted data is not valid.'];
+  }
+  return null;
+}
 
 /** Renders every error as { error: { code, message, details?, requestId } }. */
 @Catch()
@@ -59,8 +71,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
         typeof body === 'object' && body !== null && 'message' in body
           ? String(body.message)
           : exception.message;
-    } else if (isPrismaKnownError(exception) && PRISMA_CODES[exception.code]) {
-      [status, code, message] = PRISMA_CODES[exception.code]!;
+    } else {
+      const mapped = databaseError(exception);
+      if (mapped) [status, code, message] = mapped;
     }
 
     if (status >= 500) {
@@ -72,13 +85,4 @@ export class HttpExceptionFilter implements ExceptionFilter {
 
     res.status(status).json({ error: { code, message, details, requestId } });
   }
-}
-
-function isPrismaKnownError(e: unknown): e is { code: string } {
-  return (
-    typeof e === 'object' &&
-    e !== null &&
-    (e as { name?: string }).name === 'PrismaClientKnownRequestError' &&
-    typeof (e as { code?: unknown }).code === 'string'
-  );
 }

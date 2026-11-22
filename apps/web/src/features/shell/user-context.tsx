@@ -1,6 +1,6 @@
 'use client';
 
-import type { Permission, SessionUser } from '@nova/shared';
+import { canSeeProjectMoney, type Permission, type SessionUser } from '@nova/shared';
 import { createContext, useContext } from 'react';
 
 const UserContext = createContext<SessionUser | null>(null);
@@ -18,4 +18,9 @@ export function useUser(): SessionUser {
 /** UI-side permission check. The API enforces the same rules; this only hides unusable controls. */
 export function useCan(permission: Permission): boolean {
   return useUser().permissions.includes(permission);
+}
+
+/** Whether this user is sent what productions cost (the API applies the same shared rule). */
+export function useCanSeeProjectMoney(): boolean {
+  return canSeeProjectMoney(useUser().permissions);
 }

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import type { Asset, AssetBooking, CrewCall, Project, Shoot, TeamMember } from '@nova/db';
 import { findConflicts, type ScheduleView, type ShootView } from '@nova/shared';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 
 interface Reservation {
   id: string;
@@ -19,22 +20,29 @@ interface Reservation {
  */
 @Injectable()
 export class ScheduleConflicts {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly database: DatabaseService) {}
 
   async reservations(): Promise<Reservation[]> {
+    const { AssetBooking, CrewCall, Shoot } = this.database.models;
+    const cancelled = await Shoot.distinct('_id', { status: 'CANCELLED' });
     const [bookings, calls] = await Promise.all([
-      this.prisma.db.assetBooking.findMany({
-        where: { OR: [{ shootId: null }, { shoot: { status: { not: 'CANCELLED' } } }] },
-        include: {
-          asset: true,
-          shoot: { select: { title: true } },
-          project: { select: { title: true } },
-        },
-      }),
-      this.prisma.db.crewCall.findMany({
-        where: { shoot: { status: { not: 'CANCELLED' } } },
-        include: { teamMember: true, shoot: true },
-      }),
+      // Project-only bookings (no shoot) plus bookings of shoots that are not cancelled.
+      AssetBooking.find({ $or: [{ shootId: null }, { shootId: { $nin: cancelled } }] })
+        .populate([
+          { path: 'asset' },
+          { path: 'shoot', select: { title: 1 } },
+          { path: 'project', select: { title: 1 } },
+        ])
+        .lean<
+          (AssetBooking & {
+            asset: Asset;
+            shoot: Pick<Shoot, '_id' | 'id' | 'title'> | null;
+            project: Pick<Project, '_id' | 'id' | 'title'> | null;
+          })[]
+        >(),
+      CrewCall.find({ shootId: { $nin: cancelled } })
+        .populate([{ path: 'teamMember' }, { path: 'shoot' }])
+        .lean<(CrewCall & { teamMember: TeamMember; shoot: Shoot })[]>(),
     ]);
     return [
       ...bookings.map((b) => ({

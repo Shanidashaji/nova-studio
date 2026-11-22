@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
-// Integration tests exercise the compiled API (dist/) against a real PostgreSQL test database.
+// Integration tests exercise the compiled API (dist/) against a real MongoDB test database
+// (a replica set, which transactions require).
 // Running against compiled output keeps NestJS's decorator metadata exactly as in production.
 export default defineConfig({
   test: {

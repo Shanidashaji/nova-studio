@@ -3,8 +3,9 @@ import path from 'node:path';
 import { config } from 'dotenv';
 
 /**
- * Prepares the integration-test database once per run: applies migrations and loads the
- * demonstration seed. Uses TEST_DATABASE_URL, never DATABASE_URL.
+ * Prepares the integration-test database once per run: loads the demonstration seed, which
+ * creates every collection and index first and wipes the old data. Uses TEST_DATABASE_URL,
+ * never DATABASE_URL.
  */
 export default function setup() {
   config({ path: path.resolve(__dirname, '../../../.env'), quiet: true });
@@ -19,6 +20,5 @@ export default function setup() {
     SEED_ADMIN_PASSWORD: 'test-admin-password-123',
   };
   const cwd = path.resolve(__dirname, '../../../packages/db');
-  execSync('pnpm exec prisma migrate deploy', { cwd, env, stdio: 'pipe' });
   execSync('pnpm exec tsx src/seed/index.ts', { cwd, env, stdio: 'pipe' });
 }

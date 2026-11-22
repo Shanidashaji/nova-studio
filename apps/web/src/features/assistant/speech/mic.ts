@@ -89,6 +89,9 @@ export interface AudioInputs {
   defaultLabel: string | null;
 }
 
+/** Chrome prefixes its alias entries ("Default - Microphone Array"); the device name is the rest. */
+export const deviceName = (label: string) => label.replace(/^(Default|Communications) - /, '');
+
 /** Lists audio inputs. See `AudioInputs.known` before concluding anything from the count. */
 export async function audioInputs(): Promise<AudioInputs> {
   if (!navigator.mediaDevices?.enumerateDevices)
@@ -97,13 +100,18 @@ export async function audioInputs(): Promise<AudioInputs> {
     const inputs = (await navigator.mediaDevices.enumerateDevices()).filter(
       (d) => d.kind === 'audioinput',
     );
-    const known = inputs.some((d) => d.label !== '');
+    // Labels prove the list is real. So does an empty list once permission is granted: nothing is
+    // being hidden any more, so "no entries" means the last microphone was unplugged. Without
+    // this, disconnecting the only microphone would look the same as "permission not asked yet".
+    const known =
+      inputs.some((d) => d.label !== '') ||
+      (inputs.length === 0 && (await micPermission()) === 'granted');
     const real = inputs.filter((d) => d.deviceId !== 'default' && d.deviceId !== 'communications');
     const def = inputs.find((d) => d.deviceId === 'default') ?? real[0];
     return {
       count: real.length,
       known,
-      defaultLabel: known && def ? def.label.replace(/^Default - /, '') : null,
+      defaultLabel: known && def ? deviceName(def.label) : null,
     };
   } catch {
     return { count: 0, known: false, defaultLabel: null };
@@ -175,7 +183,8 @@ export async function checkMicrophone(): Promise<{ label: string }> {
     throw new MicCheckError(issue, e instanceof Error ? `${e.name}: ${e.message}` : String(e));
   }
   const track = stream.getAudioTracks()[0];
-  const label = track?.label ?? '';
+  // The track of the default device is labelled "Default - …"; show the same name as the device list.
+  const label = deviceName(track?.label ?? '');
   const live = track?.readyState === 'live';
   stream.getTracks().forEach((t) => t.stop());
   if (!live) throw new MicCheckError('busy', 'track ended immediately');

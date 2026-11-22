@@ -25,7 +25,7 @@ import { ZodValidationPipe } from '../../common/zod-validation.pipe';
 import { DocumentsService } from './documents.service';
 import type { UploadedFile } from './file-type';
 
-/** Memory storage: the file is validated before anything touches the disk (ADR-0012). */
+/** Memory storage: the file is validated before anything is written to storage (ADR-0012). */
 const upload = FileInterceptor('file', { limits: { fileSize: DOCUMENT_MAX_BYTES, files: 1 } });
 
 @Controller('documents')

@@ -1,5 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import type { Prisma } from '@nova/db';
+import type {
+  Expense,
+  PopulateOptions,
+  PurchaseOrder,
+  PurchaseRequest,
+  Vendor,
+  VendorQuote,
+} from '@nova/db';
 import type {
   CreateVendor,
   SessionUser,
@@ -8,28 +15,46 @@ import type {
   VendorView,
 } from '@nova/shared';
 import { conflict, notFound } from '../../common/errors';
-import { PrismaService } from '../../database/prisma.service';
+import { DatabaseService } from '../../database/database.service';
 import { ActivityService } from '../activity/activity.service';
 import { iso } from '../projects/project.mapper';
-import { expenseInclude, toExpense } from './expenses.service';
-import { orderSummaryInclude, toOrderSummary } from '../procurement/procurement.mapper';
+import { expensePopulate, toExpense, type ExpenseRow } from './expenses.service';
+import {
+  orderSummaryPopulate,
+  toOrderSummary,
+  type OrderSummaryRow,
+} from '../procurement/procurement.mapper';
 
-const vendorInclude = {
-  expenses: { where: { status: { in: ['APPROVED', 'PAID'] } }, select: { amount: true } },
-  purchaseOrders: {
-    where: { status: { in: ['ISSUED', 'PARTIALLY_RECEIVED'] } },
-    select: { id: true },
+const vendorPopulate: PopulateOptions[] = [
+  {
+    path: 'expenses',
+    match: { status: { $in: ['APPROVED', 'PAID'] } },
+    select: { vendorId: 1, amount: 1 },
   },
-} satisfies Prisma.VendorInclude;
+  {
+    path: 'purchaseOrders',
+    match: { status: { $in: ['ISSUED', 'PARTIALLY_RECEIVED'] } },
+    select: { vendorId: 1 },
+  },
+];
+
+type VendorRow = Vendor & {
+  expenses: Pick<Expense, '_id' | 'id' | 'vendorId' | 'amount'>[];
+  purchaseOrders: Pick<PurchaseOrder, '_id' | 'id' | 'vendorId'>[];
+};
+
+type QuoteRow = VendorQuote & {
+  request: Pick<PurchaseRequest, '_id' | 'id' | 'number' | 'title'>;
+};
 
 @Injectable()
 export class VendorsService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly activity: ActivityService,
   ) {}
 
-  private toView(v: Prisma.VendorGetPayload<{ include: typeof vendorInclude }>): VendorView {
+  private toView(v: VendorRow): VendorView {
     return {
       id: v.id,
       name: v.name,
@@ -46,36 +71,39 @@ export class VendorsService {
   }
 
   async list(): Promise<VendorView[]> {
-    const rows = await this.prisma.db.vendor.findMany({
-      include: vendorInclude,
-      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
-    });
+    const rows = await this.database.models.Vendor.find()
+      .populate(vendorPopulate)
+      .sort({ isActive: -1, name: 1 })
+      .lean<VendorRow[]>();
     return rows.map((v) => this.toView(v));
   }
 
   /** Spend history (expenses) is financial data: included only for `finance:read`. */
   async get(id: string, canSeeFinance: boolean): Promise<VendorDetail> {
-    const v = await this.prisma.db.vendor.findUnique({ where: { id }, include: vendorInclude });
+    const {
+      Vendor: Vendors,
+      Expense: Expenses,
+      PurchaseOrder,
+      VendorQuote: Quotes,
+    } = this.database.models;
+    const v = await Vendors.findById(id).populate(vendorPopulate).lean<VendorRow>();
     if (!v) throw notFound('Vendor');
     const [expenses, orders, quotes] = await Promise.all([
       canSeeFinance
-        ? this.prisma.db.expense.findMany({
-            where: { vendorId: id },
-            include: expenseInclude,
-            orderBy: { incurredOn: 'desc' },
-            take: 50,
-          })
-        : Promise.resolve([]),
-      this.prisma.db.purchaseOrder.findMany({
-        where: { vendorId: id },
-        include: orderSummaryInclude,
-        orderBy: { issuedOn: 'desc' },
-      }),
-      this.prisma.db.vendorQuote.findMany({
-        where: { vendorId: id },
-        include: { request: { select: { id: true, number: true, title: true } } },
-        orderBy: { createdAt: 'desc' },
-      }),
+        ? Expenses.find({ vendorId: id })
+            .populate(expensePopulate)
+            .sort({ incurredOn: -1 })
+            .limit(50)
+            .lean<ExpenseRow[]>()
+        : Promise.resolve([] as ExpenseRow[]),
+      PurchaseOrder.find({ vendorId: id })
+        .populate(orderSummaryPopulate)
+        .sort({ issuedOn: -1 })
+        .lean<OrderSummaryRow[]>(),
+      Quotes.find({ vendorId: id })
+        .populate({ path: 'request', select: { number: 1, title: 1 } })
+        .sort({ createdAt: -1 })
+        .lean<QuoteRow[]>(),
     ]);
     return {
       ...this.toView(v),
@@ -84,7 +112,7 @@ export class VendorsService {
       quotes: quotes.map((q) => ({
         id: q.id,
         amount: q.amount,
-        request: q.request,
+        request: { id: q.request.id, number: q.request.number, title: q.request.title },
         isSelected: q.isSelected,
         createdAt: iso(q.createdAt),
       })),
@@ -92,11 +120,12 @@ export class VendorsService {
   }
 
   async create(input: CreateVendor, user: SessionUser): Promise<VendorDetail> {
-    if (await this.prisma.db.vendor.findUnique({ where: { name: input.name } })) {
+    const { Vendor: Vendors } = this.database.models;
+    if (await Vendors.exists({ name: input.name })) {
       throw conflict('VENDOR_EXISTS', 'A vendor with this name already exists.');
     }
-    const v = await this.activity.transaction(async (tx, log) => {
-      const created = await tx.vendor.create({ data: input });
+    const v = await this.activity.transaction(async (log) => {
+      const created = (await Vendors.create(input)).toObject<Vendor>();
       await log({
         actorId: user.id,
         action: 'vendor.created',
@@ -110,15 +139,17 @@ export class VendorsService {
   }
 
   async update(id: string, input: UpdateVendor, user: SessionUser): Promise<VendorDetail> {
-    const before = await this.prisma.db.vendor.findUnique({ where: { id } });
+    const { Vendor: Vendors } = this.database.models;
+    const before = await Vendors.findById(id).lean<Vendor>();
     if (!before) throw notFound('Vendor');
     if (input.name && input.name !== before.name) {
-      if (await this.prisma.db.vendor.findUnique({ where: { name: input.name } })) {
+      if (await Vendors.exists({ name: input.name })) {
         throw conflict('VENDOR_EXISTS', 'A vendor with this name already exists.');
       }
     }
-    await this.activity.transaction(async (tx, log) => {
-      await tx.vendor.update({ where: { id }, data: input });
+    await this.activity.transaction(async (log) => {
+      const res = await Vendors.updateOne({ _id: id }, { $set: input });
+      if (res.matchedCount === 0) throw notFound('Vendor');
       await log({
         actorId: user.id,
         action: 'vendor.updated',

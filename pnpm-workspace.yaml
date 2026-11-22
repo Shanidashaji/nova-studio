@@ -4,10 +4,7 @@ packages:
   - tests/e2e
 
 onlyBuiltDependencies:
-  - '@embedded-postgres/windows-x64'
   - '@nestjs/core'
-  - '@prisma/engines'
   - '@swc/core'
   - esbuild
-  - prisma
   - sharp

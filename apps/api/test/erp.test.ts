@@ -1,5 +1,27 @@
 import type { INestApplication } from '@nestjs/common';
-import type { PrismaClient } from '@nova/db';
+import type {
+  Client,
+  CrewCall,
+  Database,
+  Document,
+  Expense,
+  FinancialRecord,
+  Lead,
+  LeaveRequest,
+  Permission,
+  Project,
+  Role,
+  RolePermission,
+  Shoot,
+  StockItem,
+  StudioBooking,
+  Task,
+  TeamMember,
+  User,
+  Vendor,
+  VendorQuote,
+  WorkflowTemplate,
+} from '@nova/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   ADMIN,
@@ -10,6 +32,7 @@ import {
   PRODUCER,
   VIEWER,
   bootApp,
+  found,
   setKnownPasswords,
   signIn,
   testDb,
@@ -18,7 +41,7 @@ import {
 type Agent = Awaited<ReturnType<typeof signIn>>;
 
 let app: INestApplication;
-let db: PrismaClient;
+let db: Database;
 let admin: Agent;
 let producer: Agent;
 let finance: Agent;
@@ -28,7 +51,7 @@ let viewer: Agent;
 
 beforeAll(async () => {
   app = await bootApp();
-  db = testDb();
+  db = await testDb();
   await setKnownPasswords(db);
   admin = await signIn(app, ADMIN);
   producer = await signIn(app, PRODUCER);
@@ -40,7 +63,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
-  await db?.$disconnect();
+  await db?.close();
 });
 
 const post = (a: Agent, url: string, body?: object) =>
@@ -51,7 +74,20 @@ const post = (a: Agent, url: string, body?: object) =>
 const patch = (a: Agent, url: string, body: object) =>
   a.patch(`/api/v1${url}`).set('origin', ORIGIN).send(body);
 const get = (a: Agent, url: string) => a.get(`/api/v1${url}`);
-const project = (code: string) => db.project.findUniqueOrThrow({ where: { code } });
+const project = (code: string) =>
+  found(db.models.Project.findOne({ code }).lean<Project>(), `Project ${code}`);
+const role = (key: string) => found(db.models.Role.findOne({ key }).lean<Role>(), `Role ${key}`);
+const userByEmail = (email: string) =>
+  found(db.models.User.findOne({ email }).lean<User>(), `User ${email}`);
+const stockItem = (sku: string) =>
+  found(db.models.StockItem.findOne({ sku }).lean<StockItem>(), `Stock item ${sku}`);
+const vendorNamed = (name: string) =>
+  found(db.models.Vendor.findOne({ name }).lean<Vendor>(), `Vendor ${name}`);
+const quoteFor = (requestId: string) =>
+  found(
+    db.models.VendorQuote.findOne({ requestId }).sort({ $natural: 1 }).lean<VendorQuote>(),
+    'Vendor quote',
+  );
 
 describe('administration and configurable roles (ADR-0009)', () => {
   it('lists roles and users only for user managers', async () => {
@@ -65,23 +101,24 @@ describe('administration and configurable roles (ADR-0009)', () => {
   });
 
   it('keeps the Super Admin role locked', async () => {
-    const role = await db.role.findUniqueOrThrow({ where: { key: 'SUPER_ADMIN' } });
-    const res = await patch(admin, `/admin/roles/${role.id}`, { permissions: ['workspace:read'] });
+    const sa = await role('SUPER_ADMIN');
+    const res = await patch(admin, `/admin/roles/${sa.id}`, { permissions: ['workspace:read'] });
     expect(res.status).toBe(403);
   });
 
   it('applies permission changes on the very next request', async () => {
-    const role = await db.role.findUniqueOrThrow({
-      where: { key: 'VIEWER' },
-      include: { permissions: { include: { permission: true } } },
-    });
-    const original = role.permissions.map((p) => p.permission.key);
+    const viewerRole = await found(
+      db.models.Role.findOne({ key: 'VIEWER' })
+        .populate({ path: 'permissions', populate: { path: 'permission' } })
+        .lean<Role & { permissions: (RolePermission & { permission: Permission })[] }>(),
+    );
+    const original = viewerRole.permissions.map((p) => p.permission.key);
     expect((await get(viewer, '/invoices')).status).toBe(200); // finance:read
-    await patch(admin, `/admin/roles/${role.id}`, {
+    await patch(admin, `/admin/roles/${viewerRole.id}`, {
       permissions: original.filter((p) => p !== 'finance:read'),
     }).expect(200);
     expect((await get(viewer, '/invoices')).status).toBe(403);
-    await patch(admin, `/admin/roles/${role.id}`, { permissions: original }).expect(200);
+    await patch(admin, `/admin/roles/${viewerRole.id}`, { permissions: original }).expect(200);
   });
 
   it('creates a custom role and refuses to delete it while in use', async () => {
@@ -103,12 +140,14 @@ describe('administration and configurable roles (ADR-0009)', () => {
   });
 
   it('stops users from changing their own access and only lets a super admin grant it', async () => {
-    const me = await db.user.findUniqueOrThrow({ where: { email: ADMIN.email } });
-    const role = await db.role.findUniqueOrThrow({ where: { key: 'VIEWER' } });
-    expect((await patch(admin, `/admin/users/${me.id}`, { roleId: role.id })).status).toBe(403);
-    const sa = await db.role.findUniqueOrThrow({ where: { key: 'SUPER_ADMIN' } });
+    const me = await userByEmail(ADMIN.email);
+    const viewerRole = await role('VIEWER');
+    expect((await patch(admin, `/admin/users/${me.id}`, { roleId: viewerRole.id })).status).toBe(
+      403,
+    );
+    const sa = await role('SUPER_ADMIN');
     // A plain Admin cannot create a Super Admin.
-    const adminRole = await db.role.findUniqueOrThrow({ where: { key: 'ADMIN' } });
+    const adminRole = await role('ADMIN');
     await post(admin, '/admin/users', {
       email: 'plainadmin@test.local',
       name: 'Plain Admin',
@@ -129,7 +168,7 @@ describe('administration and configurable roles (ADR-0009)', () => {
   });
 
   it('deactivation ends the user’s sessions immediately', async () => {
-    const target = await db.user.findUniqueOrThrow({ where: { email: 'colour@test.local' } });
+    const target = await userByEmail('colour@test.local');
     const agent = await signIn(app, {
       email: 'colour@test.local',
       password: 'colourist-password-1',
@@ -210,7 +249,7 @@ describe('expenses through a two-step approval chain (ADR-0010, ADR-0011)', () =
       decision: 'APPROVE',
     });
     expect(two.body.status).toBe('APPROVED');
-    const e = await db.expense.findUniqueOrThrow({ where: { id: expenseId } });
+    const e = await found(db.models.Expense.findById(expenseId).lean<Expense>());
     expect(e.status).toBe('APPROVED');
     // A decided request cannot be decided again.
     expect(
@@ -223,7 +262,7 @@ describe('expenses through a two-step approval chain (ADR-0010, ADR-0011)', () =
     const res = await post(finance, `/expenses/${expenseId}/pay`);
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('PAID');
-    const ledger = await db.financialRecord.findMany({ where: { expenseId } });
+    const ledger = await db.models.FinancialRecord.find({ expenseId }).lean<FinancialRecord[]>();
     expect(ledger).toHaveLength(1);
     expect(ledger[0]).toMatchObject({ kind: 'EXPENSE', amount: 60_000 });
     expect((await post(finance, `/expenses/${expenseId}/pay`)).status).toBe(409);
@@ -270,7 +309,11 @@ describe('invoices and payments', () => {
 
   it('rejects a project that belongs to another client', async () => {
     const a = await project('NM-26-040');
-    const other = await db.client.findFirstOrThrow({ where: { id: { not: a.clientId } } });
+    const other = await found(
+      db.models.Client.findOne({ _id: { $ne: a.clientId } })
+        .sort({ $natural: 1 })
+        .lean<Client>(),
+    );
     const res = await post(finance, '/invoices', {
       clientId: other.id,
       projectId: a.id,
@@ -291,7 +334,9 @@ describe('invoices and payments', () => {
     expect(over.status).toBe(422);
     const rest = await post(finance, `/invoices/${invoiceId}/payments`, { ...pay, amount: 21_300 });
     expect(rest.body.status).toBe('PAID');
-    const ledger = await db.financialRecord.findMany({ where: { payment: { invoiceId } } });
+    const ledger = await db.models.FinancialRecord.find({
+      paymentId: { $in: await db.models.Payment.distinct('_id', { invoiceId }) },
+    }).lean<FinancialRecord[]>();
     expect(ledger.reduce((n, r) => n + r.amount, 0)).toBe(41_300);
     expect((await post(finance, `/invoices/${invoiceId}/void`, { reason: 'x' })).status).toBe(409);
   });
@@ -313,8 +358,8 @@ describe('invoices and payments', () => {
 
 describe('procurement into inventory', () => {
   it('runs request → approval → order → receipt → stock → vendor bill', async () => {
-    const item = await db.stockItem.findUniqueOrThrow({ where: { sku: 'BAT-AA-PRO' } });
-    const vendor = await db.vendor.findUniqueOrThrow({ where: { name: 'MediaVault Supplies' } });
+    const item = await stockItem('BAT-AA-PRO');
+    const vendor = await vendorNamed('MediaVault Supplies');
     const pr = await post(creative, '/purchase-requests', {
       title: 'AA batteries',
       items: [
@@ -337,7 +382,7 @@ describe('procurement into inventory', () => {
       vendorId: vendor.id,
       amount: 6_000,
     }).expect(201);
-    const quote = await db.vendorQuote.findFirstOrThrow({ where: { requestId: pr.body.id } });
+    const quote = await quoteFor(String(pr.body.id));
     await post(finance, `/purchase-requests/${pr.body.id}/quotes/${quote.id}/select`).expect(201);
     await post(producer, `/approval-requests/${pr.body.approval.id}/decision`, {
       decision: 'APPROVE',
@@ -360,12 +405,12 @@ describe('procurement into inventory', () => {
     });
     expect(done.body.status).toBe('RECEIVED');
     expect(done.body.bill).toMatchObject({ status: 'SUBMITTED' });
-    const after = await db.stockItem.findUniqueOrThrow({ where: { id: item.id } });
+    const after = await found(db.models.StockItem.findById(item.id).lean<StockItem>());
     expect(after.onHand).toBe(item.onHand + 5);
   });
 
   it('never issues more stock than is on hand', async () => {
-    const item = await db.stockItem.findUniqueOrThrow({ where: { sku: 'CLN-LENS-WP' } });
+    const item = await stockItem('CLN-LENS-WP');
     const res = await post(producer, `/stock/${item.id}/movements`, {
       type: 'ISSUED',
       quantity: item.onHand + 1,
@@ -378,7 +423,7 @@ describe('procurement into inventory', () => {
   });
 
   it('records a recount as a signed adjustment', async () => {
-    const item = await db.stockItem.findUniqueOrThrow({ where: { sku: 'GRP-SAND-10' } });
+    const item = await stockItem('GRP-SAND-10');
     const res = await post(producer, `/stock/${item.id}/movements`, {
       type: 'ADJUSTED',
       countedOnHand: item.onHand - 2,
@@ -395,7 +440,11 @@ describe('procurement into inventory', () => {
 
 describe('studios, leave and scheduling constraints', () => {
   it('rejects an overlapping studio booking', async () => {
-    const b = await db.studioBooking.findFirstOrThrow({ where: { status: 'CONFIRMED' } });
+    const b = await found(
+      db.models.StudioBooking.findOne({ status: 'CONFIRMED' })
+        .sort({ $natural: 1 })
+        .lean<StudioBooking>(),
+    );
     const res = await post(producer, '/studio-bookings', {
       studioId: b.studioId,
       title: 'Clash',
@@ -414,18 +463,23 @@ describe('studios, leave and scheduling constraints', () => {
   });
 
   it('approved leave blocks a crew call for that member', async () => {
-    const shoot = await db.shoot.findFirstOrThrow({
-      where: { startsAt: { gt: new Date() }, status: { not: 'CANCELLED' } },
-      orderBy: { startsAt: 'desc' },
-      include: { crew: true },
+    const shoot = await found(
+      db.models.Shoot.findOne({ startsAt: { $gt: new Date() }, status: { $ne: 'CANCELLED' } })
+        .sort({ startsAt: -1 })
+        .populate('crew')
+        .lean<Shoot & { crew: CrewCall[] }>(),
+    );
+    const onLeave = await db.models.LeaveRequest.distinct('teamMemberId', {
+      status: { $in: ['PENDING', 'APPROVED'] },
     });
-    const member = await db.teamMember.findFirstOrThrow({
-      where: {
-        id: { notIn: shoot.crew.map((c) => c.teamMemberId) },
-        leaveRequests: { none: { status: { in: ['PENDING', 'APPROVED'] } } },
+    const member = await found(
+      db.models.TeamMember.findOne({
+        _id: { $nin: [...shoot.crew.map((c) => c.teamMemberId), ...onLeave] },
         userId: null,
-      },
-    });
+      })
+        .sort({ $natural: 1 })
+        .lean<TeamMember>(),
+    );
     // HR files the leave on the member's behalf; HR cannot approve its own request.
     const leave = await post(hr, '/hr/leave', {
       teamMemberId: member.id,
@@ -445,9 +499,9 @@ describe('studios, leave and scheduling constraints', () => {
     await post(producer, `/approval-requests/${leave.body.approval.id}/decision`, {
       decision: 'APPROVE',
     }).expect(201);
-    expect((await db.leaveRequest.findUniqueOrThrow({ where: { id: leave.body.id } })).status).toBe(
-      'APPROVED',
-    );
+    expect(
+      (await found(db.models.LeaveRequest.findById(leave.body.id).lean<LeaveRequest>())).status,
+    ).toBe('APPROVED');
 
     const call = await post(producer, `/shoots/${shoot.id}/crew`, {
       teamMemberId: member.id,
@@ -523,9 +577,11 @@ describe('documents (ADR-0012)', () => {
   });
 
   it('hides confidential documents as if they did not exist', async () => {
-    const contract = await db.document.findFirstOrThrow({
-      where: { confidential: true, category: 'CONTRACT' },
-    });
+    const contract = await found(
+      db.models.Document.findOne({ confidential: true, category: 'CONTRACT' })
+        .sort({ $natural: 1 })
+        .lean<Document>(),
+    );
     expect((await get(finance, `/documents/${contract.id}`)).status).toBe(200);
     expect((await get(creative, `/documents/${contract.id}`)).status).toBe(404);
     expect((await get(creative, `/documents/${contract.id}/versions/1/file`)).status).toBe(404);
@@ -536,10 +592,16 @@ describe('documents (ADR-0012)', () => {
 
 describe('CRM and project plan', () => {
   it('converts a prospect lead into a client and a project', async () => {
-    const lead = await db.lead.findFirstOrThrow({
-      where: { clientId: null, convertedProjectId: null, stage: { not: 'LOST' } },
-    });
-    const template = await db.workflowTemplate.findFirstOrThrow({ where: { isDefault: true } });
+    const lead = await found(
+      db.models.Lead.findOne({ clientId: null, convertedProjectId: null, stage: { $ne: 'LOST' } })
+        .sort({ $natural: 1 })
+        .lean<Lead>(),
+    );
+    const template = await found(
+      db.models.WorkflowTemplate.findOne({ isDefault: true })
+        .sort({ $natural: 1 })
+        .lean<WorkflowTemplate>(),
+    );
     const start = new Date();
     const res = await post(producer, `/leads/${lead.id}/convert`, {
       newClient: { industry: 'Hospitality', city: 'Kozhikode' },
@@ -552,16 +614,19 @@ describe('CRM and project plan', () => {
       budget: lead.estimatedValue,
     });
     expect(res.status).toBe(201);
-    const after = await db.lead.findUniqueOrThrow({ where: { id: lead.id } });
+    const after = await found(db.models.Lead.findById(lead.id).lean<Lead>());
     expect(after).toMatchObject({ stage: 'WON', convertedProjectId: res.body.id });
     expect(after.clientId).not.toBeNull();
     expect((await post(producer, `/leads/${lead.id}/convert`, {})).status).toBe(400);
   });
 
   it('adds subtasks one level deep only', async () => {
-    const parent = await db.task.findFirstOrThrow({
-      where: { parentId: null, project: { code: 'NM-26-033' } },
-    });
+    const campus = await project('NM-26-033');
+    const parent = await found(
+      db.models.Task.findOne({ parentId: null, projectId: campus.id })
+        .sort({ $natural: 1 })
+        .lean<Task>(),
+    );
     const sub = await post(producer, '/tasks', {
       projectId: parent.projectId,
       title: 'Sub step',
@@ -588,18 +653,20 @@ describe('CRM and project plan', () => {
 
 describe('database integrity constraints', () => {
   it('rejects an approval request without exactly one subject', async () => {
-    const user = await db.user.findFirstOrThrow();
+    const user = await found(db.models.User.findOne().sort({ $natural: 1 }).lean<User>());
     await expect(
-      db.approvalRequest.create({
-        data: { subject: 'EXPENSE', title: 'orphan', requestedById: user.id },
+      db.models.ApprovalRequest.create({
+        subject: 'EXPENSE',
+        title: 'orphan',
+        requestedById: user.id,
       }),
     ).rejects.toThrow();
   });
 
   it('rejects negative stock', async () => {
-    const item = await db.stockItem.findFirstOrThrow();
+    const item = await found(db.models.StockItem.findOne().sort({ $natural: 1 }).lean<StockItem>());
     await expect(
-      db.stockItem.update({ where: { id: item.id }, data: { onHand: -1 } }),
+      db.models.StockItem.updateOne({ _id: item.id }, { $set: { onHand: -1 } }).exec(),
     ).rejects.toThrow();
   });
 });
@@ -666,7 +733,7 @@ describe('review fixes (audit findings)', () => {
   });
 
   it('will not issue an order above the approved amount', async () => {
-    const vendor = await db.vendor.findUniqueOrThrow({ where: { name: 'Lenswala Rentals' } });
+    const vendor = await vendorNamed('Lenswala Rentals');
     const pr = await post(creative, '/purchase-requests', {
       title: 'Cheap estimate',
       items: [{ description: 'Filter', quantity: 1, estimatedUnitCost: 1_000 }],
@@ -675,7 +742,7 @@ describe('review fixes (audit findings)', () => {
       vendorId: vendor.id,
       amount: 90_000,
     }).expect(201);
-    const quote = await db.vendorQuote.findFirstOrThrow({ where: { requestId: pr.body.id } });
+    const quote = await quoteFor(String(pr.body.id));
     await post(finance, `/purchase-requests/${pr.body.id}/quotes/${quote.id}/select`).expect(201);
     await post(producer, `/approval-requests/${pr.body.approval.id}/decision`, {
       decision: 'APPROVE',
@@ -759,7 +826,7 @@ describe('review fixes (audit findings)', () => {
       email: 'peopleadmin@test.local',
       password: 'people-admin-password',
     });
-    const adminRole = await db.role.findUniqueOrThrow({ where: { key: 'ADMIN' } });
+    const adminRole = await role('ADMIN');
     const res = await post(agent, '/admin/users', {
       email: 'escalate@test.local',
       name: 'Escalation',

@@ -146,26 +146,26 @@ export class DemoProvider implements AssistantProvider {
     // ── Questions ───────────────────────────────────────────────────────────
     {
       test: /\b(attention|today|priorit|focus on|urgent|first)\b/,
-      run: async () =>
+      run: async (_msg, ctx) =>
         reply(
-          await this.tools.attention(),
+          await this.tools.attention(ctx),
           'Here is what needs a decision, highest priority first:',
           ['Which workflows are blocked?', 'Show the workload of the team'],
         ),
     },
     {
       test: /\b(delay|delayed|late|overdue|behind|slipp)/,
-      run: async () =>
+      run: async (_msg, ctx) =>
         reply(
-          await this.tools.projectsBy('delayed'),
+          await this.tools.projectsBy('delayed', ctx),
           'Productions that are overdue or behind schedule:',
           ['Which projects are at risk?', 'What needs my attention today?'],
         ),
     },
     {
       test: /\b(block|blocked|stuck|held|holding)\b/,
-      run: async () =>
-        reply(await this.tools.blocked(), 'What is holding the pipeline:', [
+      run: async (_msg, ctx) =>
+        reply(await this.tools.blocked(ctx), 'What is holding the pipeline:', [
           'Which approvals are waiting?',
           'Summarize the current operations',
         ]),
@@ -199,10 +199,10 @@ export class DemoProvider implements AssistantProvider {
     },
     {
       test: /\b(deadline|due|approaching|this week|next week)\b/,
-      run: async (msg) => {
+      run: async (msg, ctx) => {
         const days = /\bnext (\d+) days\b/.exec(normalize(msg))?.[1];
         return reply(
-          await this.tools.projectsBy('due_soon', days ? Number(days) : 7),
+          await this.tools.projectsBy('due_soon', ctx, days ? Number(days) : 7),
           `Due in the next ${days ?? 7} days:`,
           ['Which projects are delayed?', 'Show upcoming shoots'],
         );
@@ -210,9 +210,9 @@ export class DemoProvider implements AssistantProvider {
     },
     {
       test: /\b(risk|risky|health|critical)\b/,
-      run: async () =>
+      run: async (_msg, ctx) =>
         reply(
-          await this.tools.projectsBy('at_risk'),
+          await this.tools.projectsBy('at_risk', ctx),
           'Productions below “on track”, with the reasons:',
           ['What needs my attention today?', 'Which workflows are blocked?'],
         ),
@@ -241,7 +241,7 @@ export class DemoProvider implements AssistantProvider {
             'Create a task for this project',
             'Move it to the next stage',
           ]);
-        return reply(await this.tools.operations(), 'Studio at a glance:', [
+        return reply(await this.tools.operations(ctx), 'Studio at a glance:', [
           'What needs my attention today?',
           'Which projects are delayed?',
         ]);

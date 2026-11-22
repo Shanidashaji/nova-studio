@@ -2,7 +2,7 @@ import { HttpStatus, Injectable } from '@nestjs/common';
 import { hashPassword, verifyPassword } from '@nova/db';
 import type { LoginRequest } from '@nova/shared';
 import { AppError } from '../common/errors';
-import { PrismaService } from '../database/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { ActivityService } from '../modules/activity/activity.service';
 import { SessionService } from './session.service';
 
@@ -12,13 +12,13 @@ export class AuthService {
   private readonly dummyHash = hashPassword('nova-timing-equaliser');
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly database: DatabaseService,
     private readonly sessions: SessionService,
     private readonly activity: ActivityService,
   ) {}
 
   async login(input: LoginRequest, meta: { ip?: string; userAgent?: string }) {
-    const user = await this.prisma.db.user.findUnique({ where: { email: input.email } });
+    const user = await this.database.models.User.findOne({ email: input.email }).lean();
     const valid = user
       ? await verifyPassword(user.passwordHash, input.password)
       : await verifyPassword(await this.dummyHash, input.password).then(() => false);
@@ -32,7 +32,10 @@ export class AuthService {
     }
 
     const { token } = await this.sessions.create(user.id, meta);
-    await this.prisma.db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+    await this.database.models.User.updateOne(
+      { _id: user.id },
+      { $set: { lastLoginAt: new Date() } },
+    );
     await this.activity.log({
       actorId: user.id,
       action: 'auth.login',

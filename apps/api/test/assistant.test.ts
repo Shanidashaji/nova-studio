@@ -1,25 +1,25 @@
 import type { INestApplication } from '@nestjs/common';
-import type { PrismaClient } from '@nova/db';
+import type { ActivityLog, Database, Project, Task, TeamMember } from '@nova/db';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ADMIN, ORIGIN, bootApp, setKnownPasswords, signIn, testDb } from './helpers';
+import { ADMIN, ORIGIN, bootApp, found, setKnownPasswords, signIn, testDb } from './helpers';
 
 let app: INestApplication;
-let db: PrismaClient;
+let db: Database;
 let admin: Awaited<ReturnType<typeof signIn>>;
 
 beforeAll(async () => {
   // Integration tests exercise demo mode regardless of the developer's .env.
   process.env.ANTHROPIC_API_KEY = '';
   app = await bootApp();
-  db = testDb();
+  db = await testDb();
   await setKnownPasswords(db);
   admin = await signIn(app, ADMIN);
 });
 
 afterAll(async () => {
   await app?.close();
-  await db?.$disconnect();
+  await db?.close();
 });
 
 const ask = (message: string, context?: unknown) =>
@@ -40,7 +40,7 @@ describe('NOVA assistant (demo mode)', () => {
   });
 
   it('proposes a task without creating it, then creates it on confirmation', async () => {
-    const before = await db.task.count({ where: { title: 'Assistant test task' } });
+    const before = await db.models.Task.countDocuments({ title: 'Assistant test task' });
     const res = await ask(
       'Create a task "Assistant test task" for Woven Light due Friday for Divya',
     );
@@ -48,21 +48,23 @@ describe('NOVA assistant (demo mode)', () => {
     expect(res.body.proposals).toHaveLength(1);
     const proposal = res.body.proposals[0];
     expect(proposal.status).toBe('PROPOSED');
-    expect(await db.task.count({ where: { title: 'Assistant test task' } })).toBe(before);
+    expect(await db.models.Task.countDocuments({ title: 'Assistant test task' })).toBe(before);
 
     const confirmed = await admin
       .post(`/api/v1/assistant/actions/${proposal.id}/confirm`)
       .set('origin', ORIGIN);
     expect(confirmed.status).toBe(200);
     expect(confirmed.body.status).toBe('CONFIRMED');
-    const task = await db.task.findFirstOrThrow({
-      where: { title: 'Assistant test task' },
-      include: { assignee: true },
-    });
+    const task = await found(
+      db.models.Task.findOne({ title: 'Assistant test task' })
+        .populate('assignee')
+        .lean<Task & { assignee: TeamMember | null }>(),
+    );
     expect(task.assignee?.name).toBe('Divya Raghavan');
-    const log = await db.activityLog.findFirst({
-      where: { entityId: task.id, action: 'task.created' },
-    });
+    const log = await db.models.ActivityLog.findOne({
+      entityId: task.id,
+      action: 'task.created',
+    }).lean<ActivityLog>();
     expect(log?.source).toBe('ASSISTANT');
 
     const twice = await admin
@@ -79,7 +81,9 @@ describe('NOVA assistant (demo mode)', () => {
       .set('origin', ORIGIN);
     expect(cancelled.body.status).toBe('CANCELLED');
     expect(
-      await db.clientInteraction.count({ where: { summary: 'discussed monsoon shoot dates' } }),
+      await db.models.ClientInteraction.countDocuments({
+        summary: 'discussed monsoon shoot dates',
+      }),
     ).toBe(0);
   });
 
@@ -87,15 +91,19 @@ describe('NOVA assistant (demo mode)', () => {
     const res = await ask('Mark sky replacement on Woven Light as done');
     const proposal = res.body.proposals[0];
     expect(proposal).toBeTruthy();
-    const task = await db.task.findFirstOrThrow({
-      where: { title: { startsWith: 'Sky replacement' }, project: { code: 'NM-26-031' } },
-    });
-    await db.task.update({ where: { id: task.id }, data: { description: 'changed elsewhere' } });
+    const woven = await found(db.models.Project.findOne({ code: 'NM-26-031' }).lean<Project>());
+    const task = await found(
+      db.models.Task.findOne({ title: /^Sky replacement/, projectId: woven.id }).lean<Task>(),
+    );
+    await db.models.Task.updateOne(
+      { _id: task.id },
+      { $set: { description: 'changed elsewhere' } },
+    );
     const confirmed = await admin
       .post(`/api/v1/assistant/actions/${proposal.id}/confirm`)
       .set('origin', ORIGIN);
     expect(confirmed.body.status).toBe('STALE');
-    expect((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status).not.toBe('DONE');
+    expect((await found(db.models.Task.findById(task.id).lean<Task>())).status).not.toBe('DONE');
   });
 
   it('scopes a reassignment to the production named in the request', async () => {
@@ -115,7 +123,7 @@ describe('NOVA assistant (demo mode)', () => {
   });
 
   it('uses the inspected project as "this project"', async () => {
-    const p = await db.project.findUniqueOrThrow({ where: { code: 'NM-26-037' } });
+    const p = await found(db.models.Project.findOne({ code: 'NM-26-037' }).lean<Project>());
     const res = await ask('Create a task "Context task" due tomorrow', {
       inspect: { type: 'project', id: p.id },
     });
