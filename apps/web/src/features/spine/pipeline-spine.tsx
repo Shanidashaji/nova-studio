@@ -32,6 +32,9 @@ const STAGE_ICON: Record<StageKey, LucideIcon> = {
   DELIVERY: Send,
 };
 
+/** Phone labels, so all six stations fit without scrolling sideways. */
+const SHORT_LABEL: Partial<Record<StageKey, string>> = { PRE_PRODUCTION: 'Pre-prod' };
+
 /** Shortcuts to the lenses that read like report tabs. */
 const TABS: { lens: Lens; label: string }[] = [
   { lens: 'pulse', label: 'Overview' },
@@ -59,7 +62,7 @@ export function PipelineSpine() {
     <section aria-label="Production pipeline" className="relative z-[1] -mt-6 px-4 lg:px-8">
       <PipelineNav />
       {q.isPending ? (
-        <div className="mt-5 grid grid-cols-6 gap-4">
+        <div className="mt-5 grid grid-cols-6 gap-2 sm:gap-4">
           {Array.from({ length: 6 }, (_, i) => (
             <Skeleton key={i} className="h-16" />
           ))}
@@ -67,12 +70,13 @@ export function PipelineSpine() {
       ) : q.isError ? (
         <p className="mt-4 text-sm text-critical">Pipeline metrics could not load.</p>
       ) : (
+        // All six stations fit a phone (short labels below `sm`); wider screens space them out.
         <div className="scrollbar-none -mx-4 overflow-x-auto px-4 lg:mx-0 lg:px-0">
-          <ol className="relative flex min-w-[720px] items-start pb-2 pt-9">
+          <ol className="relative flex min-w-[300px] items-start pb-2 pt-9 sm:min-w-[720px]">
             {/* The line the stations sit on: dotted lead-in, solid run, dotted run-out to the flag. */}
             <span
               aria-hidden
-              className="absolute left-0 right-8 top-[60px] h-px bg-[linear-gradient(90deg,transparent,var(--line-strong)_6%,var(--line-strong)_94%,transparent)]"
+              className="absolute left-0 right-5 top-[60px] sm:right-8 h-px bg-[linear-gradient(90deg,transparent,var(--line-strong)_6%,var(--line-strong)_94%,transparent)]"
             />
             <Flag
               aria-hidden
@@ -89,7 +93,7 @@ export function PipelineSpine() {
                 onFocus={() => focusStage(stage.key, stage.label)}
               />
             ))}
-            <li className="w-8 shrink-0" aria-hidden />
+            <li className="w-5 shrink-0 sm:w-8" aria-hidden />
           </ol>
         </div>
       )}
@@ -106,8 +110,8 @@ function PipelineNav() {
   const [creating, setCreating] = useState(false);
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-full border border-line bg-surface-1 p-1 shadow-[var(--shadow-card)] scrollbar-none">
+    <div className="flex items-center gap-2">
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-full sm:flex-none border border-line bg-surface-1 p-1 shadow-[var(--shadow-card)] scrollbar-none">
         <Tooltip content="Stage workflows and their rules">
           <button
             type="button"
@@ -144,9 +148,11 @@ function PipelineNav() {
           <button
             type="button"
             onClick={() => setCreating(true)}
-            className="ml-auto inline-flex h-10 items-center gap-1.5 rounded-full bg-ink px-4 text-xs font-semibold text-ink-text shadow-[0_10px_24px_-12px_rgb(0_0_0/0.6)] transition-transform hover:-translate-y-px"
+            aria-label="New Project"
+            className="ml-auto inline-flex size-10 shrink-0 items-center justify-center gap-1.5 rounded-full bg-ink text-xs sm:w-auto sm:px-4 font-semibold text-ink-text shadow-[0_10px_24px_-12px_rgb(0_0_0/0.6)] transition-transform hover:-translate-y-px"
           >
-            <Plus className="size-4" aria-hidden /> New Project
+            <Plus className="size-4" aria-hidden />
+            <span className="hidden sm:inline">New Project</span>
           </button>
           <NewProjectDialog open={creating} onOpenChange={setCreating} />
         </>
@@ -224,8 +230,14 @@ function StageNode({
           </button>
         </Tooltip>
       </div>
-      <p className={cn('mt-1.5 text-xs font-semibold', hot ? 'text-brand' : 'text-text')}>
-        {stage.label}
+      <p
+        className={cn(
+          'mt-1.5 text-[11px] font-semibold leading-tight sm:text-xs',
+          hot ? 'text-brand' : 'text-text',
+        )}
+      >
+        <span className="sm:hidden">{SHORT_LABEL[stage.key] ?? stage.label}</span>
+        <span className="hidden sm:inline">{stage.label}</span>
       </p>
       <p
         className={cn('font-mono text-[11px] tabular', slow ? 'text-attention' : 'text-text-3')}

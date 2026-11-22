@@ -19,7 +19,7 @@ export function TopBar({ live }: { live: LiveStatus }) {
   const canAsk = useCan('assistant:use');
 
   return (
-    <header className="relative z-10 flex h-16 shrink-0 items-center gap-3 px-4 pt-2 lg:px-8">
+    <header className="relative z-10 flex h-16 shrink-0 items-center gap-2 px-4 pt-2 sm:gap-3 lg:px-8">
       <button
         type="button"
         onClick={() => setPaletteOpen(true)}
@@ -27,7 +27,7 @@ export function TopBar({ live }: { live: LiveStatus }) {
       >
         <Search className="size-4 shrink-0 text-text-2" />
         <span className="truncate">
-          Search anything…{' '}
+          Search<span className="hidden min-[400px]:inline"> anything</span>…{' '}
           <span className="hidden sm:inline">
             {canAsk ? '(projects, clients, tasks, or ask NOVA…)' : '(projects, clients, tasks…)'}
           </span>

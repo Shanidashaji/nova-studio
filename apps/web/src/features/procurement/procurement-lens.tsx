@@ -158,7 +158,7 @@ function RequestRow({ r, canOrder }: { r: PurchaseRequestView; canOrder: boolean
         <div className="flex flex-wrap items-center gap-2">
           <Select
             aria-label="Quoting vendor"
-            className="w-56"
+            className="w-full sm:w-56"
             value={vendorId}
             onChange={(e) => setVendorId(e.target.value)}
           >
@@ -175,7 +175,7 @@ function RequestRow({ r, canOrder }: { r: PurchaseRequestView; canOrder: boolean
             aria-label="Quoted amount"
             type="number"
             min={1}
-            className="w-28"
+            className="min-w-0 flex-1 sm:w-28 sm:flex-none"
             placeholder="₹ amount"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
@@ -255,7 +255,8 @@ function OrderRow(props: {
     <li className="px-4 py-2.5 text-sm">
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-mono text-xs">{props.number}</span>
-        <span className="min-w-0 flex-1 truncate">
+        {/* On phones the vendor takes the rest of the first line; amount and status wrap below. */}
+        <span className="min-w-0 flex-1 basis-40 truncate">
           {props.vendor} · {date(props.issuedOn)}
         </span>
         <span className="font-mono text-xs">{money(props.total, { exact: true })}</span>

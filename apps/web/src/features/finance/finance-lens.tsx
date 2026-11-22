@@ -114,7 +114,38 @@ export function FinanceLens() {
               isEmpty={!invoices.data?.length}
               empty={{ title: 'No invoices yet.' }}
             >
-              <div className="overflow-x-auto">
+              {/* Phones get one card per invoice; the table needs ~860px to read well. */}
+              <ul className="divide-y divide-line/60 md:hidden">
+                {(invoices.data ?? []).map((i) => (
+                  <li key={i.id} className="flex flex-col gap-1.5 px-4 py-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs">{i.number}</span>
+                      <Badge tone={invoiceTone[i.status]}>{titleCase(i.status)}</Badge>
+                    </div>
+                    <p className="truncate text-sm text-text-2">{i.client.name}</p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                      <span>
+                        Due {date(i.dueDate)}
+                        {i.overdue ? (
+                          <span className="ml-1.5 text-critical">{i.daysOverdue}d late</span>
+                        ) : null}
+                      </span>
+                      <span className="font-mono">
+                        <span className="text-text-3">Total </span>
+                        {money(i.total, { exact: true })}
+                      </span>
+                      <span className="font-mono">
+                        <span className="text-text-3">Balance </span>
+                        {money(i.balance, { exact: true })}
+                      </span>
+                      <span className="ml-auto">
+                        <InvoiceActions invoice={i} />
+                      </span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <div className="hidden overflow-x-auto md:block">
                 <table className="w-full min-w-[860px] text-sm">
                   <thead>
                     <tr className="text-left">
@@ -131,7 +162,7 @@ export function FinanceLens() {
                     {(invoices.data ?? []).map((i) => (
                       <tr key={i.id} className="border-t border-line/60 hover:bg-surface-2">
                         <td className="px-4 py-2">
-                          <span className="font-mono text-xs">{i.number}</span>
+                          <span className="whitespace-nowrap font-mono text-xs">{i.number}</span>
                         </td>
                         <td className="px-4 py-2 text-text-2">{i.client.name}</td>
                         <td className="px-4 py-2 text-xs">
@@ -216,8 +247,9 @@ function ExpenseRow({ e, canPay }: { e: ExpenseView; canPay: boolean }) {
     success: 'Marked as paid and posted to the ledger',
   });
   return (
-    <li className="flex flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
-      <div className="min-w-0 flex-1">
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 text-sm">
+      {/* Full width on phones, so the amount and status drop to their own line. */}
+      <div className="w-full min-w-0 sm:w-auto sm:flex-1">
         <span className="block truncate font-medium">{e.title}</span>
         <span className="block truncate text-xs text-text-3">
           {e.number} · {e.submittedBy.name} · {date(e.incurredOn)}

@@ -39,7 +39,13 @@ test('finance shows receivables, invoices and expenses from the API', async ({ p
   await openLens(page, 'Finance');
   await expect(page.getByText('Demonstration data.')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Invoices', exact: true })).toBeVisible();
-  await expect(page.getByText(/NM-INV-\d{4}-\d{3}/).first()).toBeVisible();
+  // Phones get invoice cards and wider screens a table; only one of the two is shown.
+  await expect(
+    page
+      .getByText(/NM-INV-\d{4}-\d{3}/)
+      .filter({ visible: true })
+      .first(),
+  ).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Expenses', exact: true })).toBeVisible();
 });
 

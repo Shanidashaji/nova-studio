@@ -95,6 +95,12 @@
     background: var(--signal-soft);
   }
 
+  /* Grid items default to `min-width: auto`, so one line of truncated text could push a card
+     past a phone's edge. Let them shrink to their track; utilities still override this. */
+  .grid > * {
+    min-width: 0;
+  }
+
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--line-strong) transparent;

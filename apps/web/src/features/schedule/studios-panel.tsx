@@ -51,7 +51,7 @@ export function StudiosPanel() {
                       {s.kind} · {titleCase(s.location)} · {money(s.hourlyRate)}/h
                     </p>
                   </div>
-                  <span className="font-mono text-[10px] text-text-3">
+                  <span className="shrink-0 whitespace-nowrap font-mono text-[10px] text-text-3">
                     {pct(s.utilisation)} this week
                   </span>
                 </div>
